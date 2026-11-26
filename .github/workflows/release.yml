@@ -1,16 +1,33 @@
 name: Build and Release Windows Installer
 
 on:
+  # 1. Al hacer push a main/master: GitHub detecta el código y compila el instalador nativo .exe automáticamente
   push:
+    branches:
+      - main
+      - master
+    # 2. Al subir un tag (ej. v1.0.0, v1.0.1): compila el instalador .exe y publica la Release con latest.yml para auto-actualizaciones
     tags:
-      - 'v*.*.*'
+      - 'v*'
+  # 3. Botón manual "Run workflow" en la pestaña Actions de GitHub
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Versión opcional para el instalador (ej. 1.0.0). Déjalo vacío para usar package.json.'
+        required: false
+        default: ''
+      publish_release:
+        description: 'Publicar en GitHub Releases (genera latest.yml para auto-actualizaciones)'
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: write
 
 jobs:
   release-windows:
-    name: Compilar e instalar NSIS (Windows x64)
+    name: Compilar instalador nativo NSIS (Windows x64)
     runs-on: windows-latest
 
     steps:
@@ -22,16 +39,30 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Verificar coincidencia entre tag Git y package.json
+      - name: Determinar versión y modo de publicación
+        id: meta
         shell: pwsh
         run: |
-          $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
-          $pkgVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          Write-Host "Tag detectado: v$tagVersion | Versión en package.json: $pkgVersion"
-          if ($tagVersion -ne $pkgVersion) {
-            Write-Error "La versión en package.json ($pkgVersion) no coincide con el tag ($tagVersion). Actualiza package.json antes de crear el tag."
-            exit 1
+          $isTag = "${{ github.ref_type }}" -eq "tag"
+          $isManualPublish = ("${{ github.event_name }}" -eq "workflow_dispatch") -and ("${{ inputs.publish_release }}" -eq "true")
+          $shouldPublish = $isTag -or $isManualPublish
+
+          if ($isTag) {
+            $targetVersion = "${{ github.ref_name }}" -replace '^v', ''
+          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch" -and -not [string]::IsNullOrWhiteSpace("${{ inputs.release_version }}")) {
+            $targetVersion = "${{ inputs.release_version }}" -replace '^v', ''
+          } else {
+            $targetVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
           }
+
+          Write-Host "Evento: ${{ github.event_name }} | Versión objetivo: $targetVersion | Publicar Release: $shouldPublish"
+          "version=$targetVersion" >> $env:GITHUB_OUTPUT
+          "publish=$($shouldPublish.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      - name: Sincronizar versión en package.json para el instalador y latest.yml
+        shell: pwsh
+        run: |
+          npm version "${{ steps.meta.outputs.version }}" --no-git-tag-version --allow-same-version
 
       - name: Instalar dependencias
         shell: pwsh
@@ -52,7 +83,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run setup:assets
 
-      - name: Verificar presencia de qpdf y modelos OCR antes de empaquetar
+      - name: Verificar recursos offline obligatorios antes de empaquetar
         shell: pwsh
         run: |
           $requiredFiles = @(
@@ -77,37 +108,59 @@ jobs:
         shell: pwsh
         run: npm run build
 
-      - name: Empaquetar instalador NSIS (.exe) y publicar en GitHub Releases
+      - name: Empaquetar instalador nativo NSIS (.exe) con soporte de auto-actualización
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          npx electron-builder --win nsis --x64 --publish always `
+          $publishMode = if ("${{ steps.meta.outputs.publish }}" -eq "true") { "always" } else { "never" }
+          Write-Host "Ejecutando electron-builder (NSIS x64, --publish $publishMode)..."
+          npx electron-builder --win nsis --x64 --publish $publishMode `
+            -c.publish.provider=github `
             -c.publish.owner="${{ github.repository_owner }}" `
-            -c.publish.repo="${{ github.event.repository.name }}"
+            -c.publish.repo="${{ github.event.repository.name }}" `
+            -c.publish.releaseType=release
 
-      - name: Verificar artefactos generados (.exe, .blockmap, latest.yml)
+      - name: Verificar instalador NSIS, app-update.yml y artefactos de auto-actualización
         shell: pwsh
         run: |
           Get-ChildItem -Path release | Format-Table Name, Length
-          if (-not (Test-Path "release/latest.yml")) {
-            Write-Error "No se generó release/latest.yml requerido por electron-updater."
-            exit 1
-          }
           $exeFiles = Get-ChildItem -Path release -Filter "LibreDoc-Studio-Setup-*.exe"
-          $blockmaps = Get-ChildItem -Path release -Filter "*.blockmap"
-          if ($exeFiles.Count -eq 0 -or $blockmaps.Count -eq 0) {
-            Write-Error "Faltan artefactos NSIS (.exe o .blockmap) en release/."
+          if ($exeFiles.Count -eq 0) {
+            Write-Error "No se generó el instalador NSIS LibreDoc-Studio-Setup-*.exe en release/."
             exit 1
           }
-          Write-Host "Release verificada correctamente: $($exeFiles[0].Name), $($blockmaps[0].Name) y latest.yml"
 
-      - name: Guardar respaldo de artefactos en el workflow
+          $appUpdateYml = "release/win-unpacked/resources/app-update.yml"
+          if (-not (Test-Path $appUpdateYml)) {
+            Write-Error "No se generó $appUpdateYml; la app instalada no podría consultar GitHub Releases."
+            exit 1
+          }
+          Write-Host "Contenido de app-update.yml empaquetado dentro del instalador:"
+          Get-Content $appUpdateYml
+
+          if ("${{ steps.meta.outputs.publish }}" -eq "true") {
+            if (-not (Test-Path "release/latest.yml")) {
+              Write-Error "No se generó release/latest.yml requerido por electron-updater."
+              exit 1
+            }
+            $blockmaps = Get-ChildItem -Path release -Filter "*.blockmap"
+            if ($blockmaps.Count -eq 0) {
+              Write-Error "Falta el archivo .blockmap en release/."
+              exit 1
+            }
+            Write-Host "Release publicada correctamente: $($exeFiles[0].Name), $($blockmaps[0].Name) y latest.yml"
+          } else {
+            Write-Host "Instalador NSIS compilado correctamente: $($exeFiles[0].Name)"
+          }
+
+      - name: Adjuntar instalador Windows (.exe) como artefacto descargable del workflow
         uses: actions/upload-artifact@v4
         with:
-          name: LibreDoc-Studio-Windows-Installer-${{ github.ref_name }}
+          name: LibreDoc-Studio-Setup-v${{ steps.meta.outputs.version }}-win-x64
           path: |
             release/LibreDoc-Studio-Setup-*.exe
             release/LibreDoc-Studio-Setup-*.exe.blockmap
             release/latest.yml
+          if-no-files-found: error
           retention-days: 30

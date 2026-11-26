@@ -45,11 +45,18 @@ publish:
 
 > Nota: El workflow `.github/workflows/release.yml` además inyecta automáticamente `github.repository_owner` y `github.event.repository.name` durante la compilación en GitHub Actions, y cuenta con `permissions: contents: write` para publicar la release sin pasos manuales.
 
-### Paso 2: Subir el código a GitHub y lanzar la versión inicial `v1.0.0`
+### Paso 2: Subir el código a GitHub y activar la compilación automática del instalador `.exe`
 
-1. Crea un repositorio nuevo en GitHub (público para que `electron-updater` pueda consultar Releases sin token privado).
-2. Cambia `"version"` en `package.json` a `"1.0.0"`.
-3. Inicializa Git, sube el código y publica el tag `v1.0.0`:
+El archivo `.github/workflows/release.yml` hace que **GitHub Actions detecte el proyecto automáticamente** en tres casos:
+- **Al subir código a `main` o `master`:** GitHub inicia de inmediato la compilación del instalador nativo NSIS `.exe` (ya vinculado a tu repositorio mediante `app-update.yml` para futuras actualizaciones) y lo deja descargable en **Actions → Artifacts**.
+- **Al subir un tag (`v1.0.0`, `v1.0.1`, etc.):** GitHub compila el instalador nativo `.exe` y publica automáticamente la **GitHub Release** oficial con `LibreDoc-Studio-Setup-<versión>.exe`, `.blockmap` y `latest.yml` (que leen las instalaciones existentes para auto-actualizarse).
+- **Manual desde la web de GitHub:** en **Actions → Build and Release Windows Installer → Run workflow**, puedes elegir la versión y compilar/publicar con un clic.
+
+Pasos exactos para tu primera versión instalable `v1.0.0`:
+
+1. Crea un repositorio nuevo en GitHub (público para que `electron-updater` pueda descargar Releases sin token privado).
+2. Cambia `"version"` en `package.json` a `"1.0.0"` (si subes el tag `v1.0.0`, el workflow también sincroniza la versión automáticamente).
+3. Inicializa Git, sube el código a `main` y publica el tag `v1.0.0`:
 
 ```bash
 git init
@@ -63,9 +70,9 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-4. Entra en la pestaña **Actions** de tu repositorio en GitHub y espera a que el workflow **Build and Release Windows Installer** finalice en verde (`windows-latest`).
-5. Al terminar, ve a la pestaña **Releases** de GitHub y confirma que la release `v1.0.0` contiene los tres archivos obligatorios:
-   - `LibreDoc-Studio-Setup-1.0.0.exe`
+4. Entra en la pestaña **Actions** de tu repositorio en GitHub: verás el workflow **Build and Release Windows Installer** ejecutándose en `windows-latest`.
+5. Al terminar en verde, entra en **Releases** y confirma los tres archivos publicados:
+   - `LibreDoc-Studio-Setup-1.0.0.exe` (instalador nativo NSIS que queda instalado en Windows con `app-update.yml` apuntando a tu repo)
    - `LibreDoc-Studio-Setup-1.0.0.exe.blockmap`
    - `latest.yml`
 
