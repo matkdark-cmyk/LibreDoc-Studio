@@ -112,14 +112,13 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_OWNER: ${{ github.repository_owner }}
+          GH_REPO: ${{ github.event.repository.name }}
         run: |
+          node scripts/prepare-ci-builder-config.mjs
           $publishMode = if ("${{ steps.meta.outputs.publish }}" -eq "true") { "always" } else { "never" }
           Write-Host "Ejecutando electron-builder (NSIS x64, --publish $publishMode)..."
-          npx electron-builder --win nsis --x64 --publish $publishMode `
-            -c.publish.provider=github `
-            -c.publish.owner="${{ github.repository_owner }}" `
-            -c.publish.repo="${{ github.event.repository.name }}" `
-            -c.publish.releaseType=release
+          npx electron-builder --config electron-builder.ci.yml --win nsis --x64 --publish $publishMode
 
       - name: Verificar instalador NSIS, app-update.yml y artefactos de auto-actualización
         shell: pwsh
