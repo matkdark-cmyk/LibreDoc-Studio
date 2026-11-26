@@ -42,10 +42,11 @@ jobs:
       - name: Determinar versión y modo de publicación
         id: meta
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $isTag = "${{ github.ref_type }}" -eq "tag"
           $isManualPublish = ("${{ github.event_name }}" -eq "workflow_dispatch") -and ("${{ inputs.publish_release }}" -eq "true")
-          $shouldPublish = $isTag -or $isManualPublish
 
           if ($isTag) {
             $targetVersion = "${{ github.ref_name }}" -replace '^v', ''
@@ -53,6 +54,31 @@ jobs:
             $targetVersion = "${{ inputs.release_version }}" -replace '^v', ''
           } else {
             $targetVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          }
+
+          $shouldPublish = $isTag -or $isManualPublish
+
+          # En push a main/master: publicar automáticamente en GitHub Releases si la versión v<targetVersion> aún no existe
+          if (-not $shouldPublish -and "${{ github.event_name }}" -eq "push") {
+            $releaseCheckUrl = "https://api.github.com/repos/${{ github.repository }}/releases/tags/v$targetVersion"
+            try {
+              $headers = @{
+                Authorization = "Bearer $env:GH_TOKEN"
+                Accept = "application/vnd.github+json"
+                "User-Agent" = "LibreDoc-Studio-CI"
+              }
+              Invoke-RestMethod -Uri $releaseCheckUrl -Headers $headers -Method Get | Out-Null
+              Write-Host "La Release v$targetVersion ya existe en GitHub Releases; se compilará solo como artefacto."
+            } catch {
+              $statusCode = $_.Exception.Response.StatusCode.value__
+              if ($statusCode -eq 404) {
+                Write-Host "La Release v$targetVersion aún no existe en GitHub Releases -> se publicará automáticamente con latest.yml."
+                $shouldPublish = $true
+              } else {
+                Write-Host "Aviso consultando Release v$targetVersion (HTTP $statusCode) -> se habilitará publicación automática."
+                $shouldPublish = $true
+              }
+            }
           }
 
           Write-Host "Evento: ${{ github.event_name }} | Versión objetivo: $targetVersion | Publicar Release: $shouldPublish"
@@ -119,6 +145,23 @@ jobs:
           $publishMode = if ("${{ steps.meta.outputs.publish }}" -eq "true") { "always" } else { "never" }
           Write-Host "Ejecutando electron-builder (NSIS x64, --publish $publishMode)..."
           npx electron-builder --config electron-builder.ci.yml --win nsis --x64 --publish $publishMode
+
+          # Garantizar que la Release en GitHub quede publicada (draft=false) para que electron-updater encuentre latest.yml
+          if ($publishMode -eq "always") {
+            $tagName = "v${{ steps.meta.outputs.version }}"
+            $headers = @{
+              Authorization = "Bearer $env:GH_TOKEN"
+              Accept = "application/vnd.github+json"
+              "User-Agent" = "LibreDoc-Studio-CI"
+            }
+            $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases?per_page=10" -Headers $headers -Method Get
+            $targetRelease = $releases | Where-Object { $_.tag_name -eq $tagName } | Select-Object -First 1
+            if ($targetRelease -and $targetRelease.draft -eq $true) {
+              Write-Host "Publicando borrador de Release $tagName para activar auto-actualizaciones..."
+              $patchBody = @{ draft = $false; prerelease = $false } | ConvertTo-Json
+              Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases/$($targetRelease.id)" -Headers $headers -Method Patch -Body $patchBody -ContentType "application/json" | Out-Null
+            }
+          }
 
       - name: Verificar instalador NSIS, app-update.yml y artefactos de auto-actualización
         shell: pwsh
