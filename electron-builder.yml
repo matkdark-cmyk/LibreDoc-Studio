@@ -28,8 +28,14 @@ extraResources:
     to: tessdata
     filter:
       - "*.traineddata"
+  - from: resources/icons
+    to: icons
+    filter:
+      - "*.ico"
+      - "*.png"
 
 win:
+  icon: resources/icons/icon.ico
   target:
     - target: nsis
       arch:
@@ -39,6 +45,9 @@ win:
 
 # Instalador nativo NSIS (.exe, NO portable)
 nsis:
+  installerIcon: resources/icons/icon.ico
+  uninstallerIcon: resources/icons/icon.ico
+  installerHeaderIcon: resources/icons/icon.ico
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true

@@ -1,11 +1,25 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import JSZip from 'jszip';
-import { AlertCircle, Check, FileText, Loader2 } from 'lucide-react';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { AlertCircle, Check, FileText, Loader2, X } from 'lucide-react';
 import type {
+  CheckboxStyle,
   DocumentField,
   DocumentRecord,
+  FieldType,
   PlainTextContentResult,
 } from '../../shared/types';
+
+export type PreviewDrawTool = 'none' | 'text' | 'check' | 'cross';
+
+export interface DrawnFieldRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  field_type: FieldType;
+  checkbox_style?: CheckboxStyle;
+}
 
 interface DocumentLivePreviewProps {
   document: DocumentRecord;
@@ -16,16 +30,46 @@ interface DocumentLivePreviewProps {
   activeFieldId: string | null;
   hoveredFieldId: string | null;
   showFieldHighlights: boolean;
+  drawTool: PreviewDrawTool;
   plainTextData: PlainTextContentResult | null;
   onReadWorkingFileBytes: (documentId: string) => Promise<Uint8Array | null>;
   onTotalPagesDetected: (totalPages: number) => void;
   onSelectFieldFromPreview: (fieldId: string) => void;
   onHoverField: (fieldId: string | null) => void;
+  onMoveOrResizeField: (
+    field: DocumentField,
+    geometry: { x: number; y: number; width: number; height: number },
+  ) => void;
+  onCreateDrawnField: (rect: DrawnFieldRect) => void;
+  onDeleteField: (fieldId: string) => void;
 }
 
 interface PdfPageMetrics {
   widthPt: number;
   heightPt: number;
+}
+
+interface DragState {
+  mode: 'move' | 'resize';
+  field: DocumentField;
+  startClientX: number;
+  startClientY: number;
+  origX: number;
+  origY: number;
+  origW: number;
+  origH: number;
+  curX: number;
+  curY: number;
+  curW: number;
+  curH: number;
+  moved: boolean;
+}
+
+interface DrawDraftRect {
+  startX: number;
+  startY: number;
+  curX: number;
+  curY: number;
 }
 
 const DEFAULT_PAGE_METRICS: PdfPageMetrics = {
@@ -71,14 +115,19 @@ export function DocumentLivePreview({
   activeFieldId,
   hoveredFieldId,
   showFieldHighlights,
+  drawTool,
   plainTextData,
   onReadWorkingFileBytes,
   onTotalPagesDetected,
   onSelectFieldFromPreview,
   onHoverField,
+  onMoveOrResizeField,
+  onCreateDrawnField,
+  onDeleteField,
 }: DocumentLivePreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const fieldBoxRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const pageFrameRef = useRef<HTMLDivElement | null>(null);
+  const fieldBoxRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -86,30 +135,187 @@ export function DocumentLivePreview({
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [docxParagraphs, setDocxParagraphs] = useState<string[] | null>(null);
 
+  const [dragState, setDragState] = useState<DragState | null>(null);
+  const [drawDraft, setDrawDraft] = useState<DrawDraftRect | null>(null);
+
+  const dragRef = useRef<DragState | null>(null);
+  dragRef.current = dragState;
+  const drawRef = useRef<DrawDraftRect | null>(null);
+  drawRef.current = drawDraft;
+
   const fileType = document.file_type.toLowerCase();
   const isPdf = fileType === 'pdf';
   const isImage = fileType === 'png' || fileType === 'jpg' || fileType === 'jpeg';
   const isDocx = fileType === 'docx';
   const isPlainText = document.diagnosis_type === 'PLAIN_TEXT';
 
-  // Keep a cache of raw bytes per document version so page changes & zooms render instantly
   const bytesCacheRef = useRef<{ key: string; bytes: Uint8Array | null }>({
     key: '',
     bytes: null,
   });
-
   const docCacheKey = `${document.id}:${document.working_path}:${document.updated_at}`;
 
-  // Scroll the highlighted overlay box into view whenever the active field changes
+  // Scroll the highlighted overlay box into view when selected from the left panel
   useEffect(() => {
-    if (!activeFieldId) return;
+    if (!activeFieldId || dragRef.current) return;
     const node = fieldBoxRefs.current.get(activeFieldId);
     if (node) {
       node.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
     }
   }, [activeFieldId, activePage]);
 
-  // Render PDF page onto <canvas> via pdfjs-dist
+  // Delete selected field with Delete / Supr key (when not typing inside an input/textarea)
+  useEffect(() => {
+    if (!activeFieldId) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete') return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+      onDeleteField(activeFieldId);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeFieldId, onDeleteField]);
+
+  // Global mouse move/up handlers for drag-to-move, resize, and draw-new-rectangle
+  useEffect(() => {
+    const handleMouseMove = (e: globalThis.MouseEvent) => {
+      const activeDrag = dragRef.current;
+      if (activeDrag) {
+        const dxPt = (e.clientX - activeDrag.startClientX) / Math.max(0.1, zoomLevel);
+        const dyPt = (e.clientY - activeDrag.startClientY) / Math.max(0.1, zoomLevel);
+        const moved = activeDrag.moved || Math.abs(dxPt) > 1.5 || Math.abs(dyPt) > 1.5;
+
+        if (activeDrag.mode === 'move') {
+          const nextX = Math.max(
+            0,
+            Math.min(pageMetrics.widthPt - activeDrag.origW, activeDrag.origX + dxPt),
+          );
+          const nextY = Math.max(
+            0,
+            Math.min(pageMetrics.heightPt - activeDrag.origH, activeDrag.origY + dyPt),
+          );
+          setDragState({
+            ...activeDrag,
+            curX: Number(nextX.toFixed(1)),
+            curY: Number(nextY.toFixed(1)),
+            moved,
+          });
+        } else {
+          const nextW = Math.max(
+            10,
+            Math.min(pageMetrics.widthPt - activeDrag.origX, activeDrag.origW + dxPt),
+          );
+          const nextH = Math.max(
+            10,
+            Math.min(pageMetrics.heightPt - activeDrag.origY, activeDrag.origH + dyPt),
+          );
+          setDragState({
+            ...activeDrag,
+            curW: Number(nextW.toFixed(1)),
+            curH: Number(nextH.toFixed(1)),
+            moved,
+          });
+        }
+        return;
+      }
+
+      const activeDraw = drawRef.current;
+      if (activeDraw && pageFrameRef.current) {
+        const bounds = pageFrameRef.current.getBoundingClientRect();
+        const ptX = Math.max(
+          0,
+          Math.min(pageMetrics.widthPt, (e.clientX - bounds.left) / Math.max(0.1, zoomLevel)),
+        );
+        const ptY = Math.max(
+          0,
+          Math.min(pageMetrics.heightPt, (e.clientY - bounds.top) / Math.max(0.1, zoomLevel)),
+        );
+        setDrawDraft({
+          ...activeDraw,
+          curX: ptX,
+          curY: ptY,
+        });
+      }
+    };
+
+    const handleMouseUp = () => {
+      const activeDrag = dragRef.current;
+      if (activeDrag) {
+        setDragState(null);
+        if (activeDrag.moved) {
+          onMoveOrResizeField(activeDrag.field, {
+            x: activeDrag.curX,
+            y: activeDrag.curY,
+            width: activeDrag.curW,
+            height: activeDrag.curH,
+          });
+        }
+        return;
+      }
+
+      const activeDraw = drawRef.current;
+      if (activeDraw && drawTool !== 'none') {
+        setDrawDraft(null);
+        const x0 = Math.min(activeDraw.startX, activeDraw.curX);
+        const y0 = Math.min(activeDraw.startY, activeDraw.curY);
+        let w = Math.abs(activeDraw.curX - activeDraw.startX);
+        let h = Math.abs(activeDraw.curY - activeDraw.startY);
+
+        // Support single-click placement for checkboxes or quick drag for text boxes
+        if (drawTool === 'check' || drawTool === 'cross') {
+          if (w < 8 && h < 8) {
+            w = 16;
+            h = 16;
+          } else {
+            w = Math.max(12, w);
+            h = Math.max(12, h);
+          }
+          onCreateDrawnField({
+            x: Number(x0.toFixed(1)),
+            y: Number(y0.toFixed(1)),
+            width: Number(w.toFixed(1)),
+            height: Number(h.toFixed(1)),
+            field_type: 'checkbox',
+            checkbox_style: drawTool,
+          });
+        } else {
+          if (w < 14 && h < 8) {
+            w = 160;
+            h = 18;
+          } else {
+            w = Math.max(20, w);
+            h = Math.max(12, h);
+          }
+          onCreateDrawnField({
+            x: Number(x0.toFixed(1)),
+            y: Number(y0.toFixed(1)),
+            width: Number(w.toFixed(1)),
+            height: Number(h.toFixed(1)),
+            field_type: h >= 38 ? 'multiline' : 'text',
+          });
+        }
+      }
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [zoomLevel, pageMetrics, drawTool, onMoveOrResizeField, onCreateDrawnField]);
+
+  // Render PDF page onto <canvas> via pdfjs-dist using Vite `?url` worker
   useEffect(() => {
     if (!isPdf) return;
     let cancelled = false;
@@ -139,10 +345,7 @@ export function DocumentLivePreview({
 
         const pdfjs = await import('pdfjs-dist');
         if (!pdfjs.GlobalWorkerOptions.workerSrc) {
-          pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-            'pdfjs-dist/build/pdf.worker.min.mjs',
-            import.meta.url,
-          ).toString();
+          pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
         }
 
         const task = pdfjs.getDocument({
@@ -342,7 +545,6 @@ export function DocumentLivePreview({
     };
   }, [isDocx, docCacheKey, document.id, onReadWorkingFileBytes, onTotalPagesDetected]);
 
-  // Reset metrics for plain text or generic sheets
   useEffect(() => {
     if (isPlainText) {
       setPageMetrics(DEFAULT_PAGE_METRICS);
@@ -358,15 +560,59 @@ export function DocumentLivePreview({
   const displayWidthPx = Math.round(pageMetrics.widthPt * zoomLevel);
   const displayHeightPx = Math.round(pageMetrics.heightPt * zoomLevel);
 
+  const handleStartDraw = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (drawTool === 'none' || e.button !== 0 || !pageFrameRef.current) return;
+    e.preventDefault();
+    const bounds = pageFrameRef.current.getBoundingClientRect();
+    const ptX = Math.max(
+      0,
+      Math.min(pageMetrics.widthPt, (e.clientX - bounds.left) / Math.max(0.1, zoomLevel)),
+    );
+    const ptY = Math.max(
+      0,
+      Math.min(pageMetrics.heightPt, (e.clientY - bounds.top) / Math.max(0.1, zoomLevel)),
+    );
+    setDrawDraft({ startX: ptX, startY: ptY, curX: ptX, curY: ptY });
+  };
+
+  const handleStartFieldDrag = (
+    e: ReactMouseEvent<HTMLElement>,
+    field: DocumentField,
+    mode: 'move' | 'resize',
+  ) => {
+    if (drawTool !== 'none' || e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    onSelectFieldFromPreview(field.id);
+    setDragState({
+      mode,
+      field,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      origX: field.x,
+      origY: field.y,
+      origW: field.width,
+      origH: field.height,
+      curX: field.x,
+      curY: field.y,
+      curW: field.width,
+      curH: field.height,
+      moved: false,
+    });
+  };
+
   return (
     <div className="flex flex-col items-center gap-3 w-full">
-      {/* Main visual page frame with real document content + interactive highlighted field overlays */}
       <div
+        ref={pageFrameRef}
+        onMouseDown={handleStartDraw}
         style={{
           width: `${displayWidthPx}px`,
           minHeight: `${displayHeightPx}px`,
         }}
-        className="relative bg-white text-slate-900 border border-slate-300 dark:border-slate-700 rounded-md shadow-md overflow-hidden shrink-0 transition-[width] duration-150"
+        className={`relative bg-white text-slate-900 border border-slate-300 dark:border-slate-700 rounded-md shadow-md overflow-hidden shrink-0 select-none ${
+          drawTool !== 'none' ? 'cursor-crosshair' : ''
+        }`}
       >
         {/* 1. Real PDF Canvas */}
         {isPdf && (
@@ -396,7 +642,7 @@ export function DocumentLivePreview({
 
         {/* 3. Real DOCX Extracted Visual Sheet */}
         {isDocx && (
-          <div className="p-10 space-y-4 min-h-full bg-white text-slate-900">
+          <div className="p-10 space-y-4 min-h-full bg-white text-slate-900 select-text">
             <div className="pb-4 border-b border-slate-200 flex items-center justify-between gap-4">
               <div className="min-w-0">
                 <p className="text-[11px] font-mono uppercase tracking-wide text-slate-500">
@@ -444,7 +690,7 @@ export function DocumentLivePreview({
 
         {/* 4. Real Plain Text Preview */}
         {isPlainText && (
-          <div className="p-8 space-y-3 bg-white text-slate-900 min-h-full">
+          <div className="p-8 space-y-3 bg-white text-slate-900 min-h-full select-text">
             <div className="pb-3 border-b border-slate-200 flex items-center justify-between text-xs text-slate-500 font-mono">
               <span className="truncate font-semibold text-slate-800">
                 {document.original_name}
@@ -488,123 +734,216 @@ export function DocumentLivePreview({
           </div>
         )}
 
-        {/* Interactive Field Highlight Layer (marks every editable space right on the document) */}
+        {/* Phase 4 Interactive AcroForm Overlay Layer (Blue = Text, Green = Checkbox) */}
         {fieldsOnPage.length > 0 && (
           <div
             aria-label="Espacios editables marcados sobre el documento"
             className="absolute inset-0 pointer-events-none z-10"
           >
             {fieldsOnPage.map((field) => {
+              const isDraggingThis = dragState?.field.id === field.id;
+              const fx = isDraggingThis ? dragState.curX : field.x;
+              const fy = isDraggingThis ? dragState.curY : field.y;
+              const fw = isDraggingThis ? dragState.curW : field.width;
+              const fh = isDraggingThis ? dragState.curH : field.height;
+
               const rawValue = draftValues[field.id] ?? field.value;
-              const isChecked = field.field_type === 'checkbox' && rawValue === 'true';
-              const hasValue =
-                field.field_type === 'checkbox' ? isChecked : rawValue.trim().length > 0;
+              const isCheckbox = field.field_type === 'checkbox';
+              const isChecked = isCheckbox && rawValue === 'true';
+              const hasValue = isCheckbox ? isChecked : rawValue.trim().length > 0;
               const isActive = activeFieldId === field.id;
               const isHovered = hoveredFieldId === field.id;
+              const coverDashes = field.cover_dashes === 1;
+              const alignment = field.alignment ?? 'left';
 
-              const leftPct = Math.max(
-                0,
-                Math.min(94, (field.x / Math.max(1, pageMetrics.widthPt)) * 100),
-              );
-              const topPct = Math.max(
-                0,
-                Math.min(95, (field.y / Math.max(1, pageMetrics.heightPt)) * 100),
-              );
-              const widthPct = Math.max(
-                4,
-                Math.min(100 - leftPct, (field.width / Math.max(1, pageMetrics.widthPt)) * 100),
-              );
-              const heightPct = Math.max(
-                2.4,
-                Math.min(100 - topPct, (field.height / Math.max(1, pageMetrics.heightPt)) * 100),
-              );
+              const leftPx = fx * zoomLevel;
+              const topPx = fy * zoomLevel;
+              const widthPx = Math.max(10, fw * zoomLevel);
+              const heightPx = Math.max(10, fh * zoomLevel);
 
               const scaledFontSize = Math.max(
-                10,
-                Math.min(20, Math.round((field.font_size || 11) * zoomLevel)),
+                8,
+                Math.min(18, Number(((field.font_size || 9.5) * zoomLevel).toFixed(1))),
               );
 
               let boxStyleClasses = 'border-transparent bg-transparent';
               if (isActive) {
-                boxStyleClasses =
-                  'border-2 border-blue-600 bg-blue-500/20 ring-4 ring-blue-500/25 shadow-sm z-20';
+                boxStyleClasses = isCheckbox
+                  ? 'border-2 border-emerald-600 bg-emerald-500/20 ring-2 ring-emerald-500/35 z-20'
+                  : 'border-2 border-blue-600 bg-blue-500/18 ring-2 ring-blue-500/35 z-20';
               } else if (isHovered) {
-                boxStyleClasses =
-                  'border-2 border-blue-500 bg-blue-500/12 shadow-xs z-10';
+                boxStyleClasses = isCheckbox
+                  ? 'border-2 border-emerald-500 bg-emerald-500/15 z-10'
+                  : 'border-2 border-blue-500 bg-blue-500/12 z-10';
               } else if (showFieldHighlights) {
-                boxStyleClasses = hasValue
-                  ? 'border border-emerald-600/80 bg-emerald-500/12 hover:bg-emerald-500/20'
-                  : 'border border-dashed border-amber-500/90 bg-amber-400/12 hover:bg-blue-500/12 hover:border-blue-500';
+                if (isCheckbox) {
+                  boxStyleClasses = isChecked
+                    ? 'border border-emerald-700 bg-emerald-500/18 hover:bg-emerald-500/25'
+                    : 'border border-emerald-600/80 bg-emerald-500/10 hover:bg-emerald-500/20';
+                } else {
+                  boxStyleClasses = coverDashes
+                    ? 'border-b border-slate-700 bg-white/95 hover:border-blue-600'
+                    : hasValue
+                      ? 'border border-blue-600/70 bg-blue-500/10 hover:bg-blue-500/18'
+                      : 'border border-dashed border-blue-500/85 bg-blue-400/10 hover:bg-blue-500/18';
+                }
+              } else if (coverDashes) {
+                boxStyleClasses = 'border-b border-slate-700 bg-white';
               }
 
+              const justifyClass =
+                alignment === 'center'
+                  ? 'justify-center text-center'
+                  : alignment === 'right'
+                    ? 'justify-end text-right'
+                    : 'justify-start text-left';
+
               return (
-                <button
+                <div
                   key={field.id}
                   ref={(el) => {
-                    if (el) {
-                      fieldBoxRefs.current.set(field.id, el);
-                    } else {
-                      fieldBoxRefs.current.delete(field.id);
+                    if (el) fieldBoxRefs.current.set(field.id, el);
+                    else fieldBoxRefs.current.delete(field.id);
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  onMouseDown={(e) => handleStartFieldDrag(e, field, 'move')}
+                  onClick={(e) => {
+                    if (drawTool !== 'none') return;
+                    e.stopPropagation();
+                    onSelectFieldFromPreview(field.id);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      onSelectFieldFromPreview(field.id);
                     }
                   }}
-                  type="button"
-                  onClick={() => onSelectFieldFromPreview(field.id)}
                   onMouseEnter={() => onHoverField(field.id)}
                   onMouseLeave={() => onHoverField(null)}
-                  title={`${field.label} — Haz clic para editar este espacio`}
+                  title={`${field.label} — Arrastra para mover o haz clic para editar`}
                   style={{
-                    left: `${leftPct}%`,
-                    top: `${topPct}%`,
-                    width: `${widthPct}%`,
-                    height: `${heightPct}%`,
+                    left: `${leftPx}px`,
+                    top: `${topPx}px`,
+                    width: `${widthPx}px`,
+                    height: `${heightPx}px`,
                   }}
-                  className={`pointer-events-auto absolute rounded-[3px] text-left transition-all duration-150 flex items-center px-1.5 overflow-visible cursor-pointer focus:outline-none ${boxStyleClasses}`}
+                  className={`${
+                    drawTool === 'none' ? 'pointer-events-auto cursor-move' : 'pointer-events-none'
+                  } absolute rounded-[2px] flex items-center px-1 overflow-visible focus:outline-none ${justifyClass} ${boxStyleClasses}`}
                 >
-                  {/* Floating active / hovered label tag */}
-                  {(isActive || isHovered) && (
-                    <span
-                      className={`absolute -top-6 left-0 px-2 py-0.5 rounded text-[11px] font-medium whitespace-nowrap shadow-sm pointer-events-none ${
-                        isActive
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-slate-900 text-white'
+                  {/* Floating active/hovered tag + quick X delete button */}
+                  {(isActive || isHovered) && drawTool === 'none' && (
+                    <div
+                      className={`absolute -top-6 left-0 flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium whitespace-nowrap shadow-sm ${
+                        isCheckbox
+                          ? 'bg-emerald-700 text-white'
+                          : isActive
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-900 text-white'
                       }`}
                     >
-                      {isActive ? `Editando: ${field.label}` : field.label}
-                    </span>
+                      <span className="max-w-[180px] truncate">{field.label}</span>
+                      {isActive && (
+                        <button
+                          type="button"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDeleteField(field.id);
+                          }}
+                          aria-label={`Eliminar ${field.label}`}
+                          title="Eliminar casilla (Supr)"
+                          className="ml-0.5 p-0.5 rounded hover:bg-white/25 transition-colors"
+                        >
+                          <X className="w-2.5 h-2.5" aria-hidden="true" />
+                        </button>
+                      )}
+                    </div>
                   )}
 
-                  {/* Live value preview drawn directly inside the document space */}
-                  {field.field_type === 'checkbox' ? (
-                    <span className="inline-flex items-center justify-center w-full h-full">
+                  {/* Live value preview inside the box */}
+                  {isCheckbox ? (
+                    <span className="inline-flex items-center justify-center w-full h-full leading-none">
                       {isChecked ? (
-                        <Check
-                          className="w-4 h-4 text-blue-700 stroke-[3]"
-                          aria-hidden="true"
-                        />
+                        field.checkbox_style === 'cross' ? (
+                          <X
+                            style={{
+                              width: `${Math.max(10, Math.min(widthPx, heightPx) * 0.65)}px`,
+                              height: `${Math.max(10, Math.min(widthPx, heightPx) * 0.65)}px`,
+                            }}
+                            className="text-slate-900 stroke-[2.75]"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <Check
+                            style={{
+                              width: `${Math.max(10, Math.min(widthPx, heightPx) * 0.72)}px`,
+                              height: `${Math.max(10, Math.min(widthPx, heightPx) * 0.72)}px`,
+                            }}
+                            className="text-blue-700 stroke-[3]"
+                            aria-hidden="true"
+                          />
+                        )
                       ) : (
                         showFieldHighlights && (
-                          <span className="w-3 h-3 rounded-[2px] border border-slate-500/70 bg-white/70" />
+                          <span className="text-[9px] font-mono text-emerald-800/80 select-none">
+                            {field.checkbox_style === 'cross' ? '✕' : '✓'}
+                          </span>
                         )
                       )}
                     </span>
                   ) : hasValue ? (
                     <span
                       style={{ fontSize: `${scaledFontSize}px` }}
-                      className="w-full truncate font-medium text-slate-950 bg-white/75 px-1 rounded-[2px] leading-tight"
+                      className={`w-full font-medium text-slate-950 leading-tight ${
+                        field.field_type === 'multiline'
+                          ? 'whitespace-pre-wrap break-words self-start py-0.5 overflow-hidden h-full'
+                          : 'truncate'
+                      } ${coverDashes ? 'bg-white' : 'bg-white/75 px-0.5 rounded-[2px]'}`}
                     >
                       {rawValue}
                     </span>
                   ) : (
-                    showFieldHighlights && (
-                      <span className="w-full truncate text-[10px] font-medium text-amber-900/80 leading-tight">
+                    showFieldHighlights &&
+                    !coverDashes && (
+                      <span className="w-full truncate text-[9px] font-medium text-blue-900/65 leading-tight">
                         {field.label}
                       </span>
                     )
                   )}
-                </button>
+
+                  {/* Bottom-right resize handle on active field */}
+                  {isActive && drawTool === 'none' && (
+                    <div
+                      onMouseDown={(e) => handleStartFieldDrag(e, field, 'resize')}
+                      title="Arrastra para redimensionar"
+                      className={`absolute -right-1.5 -bottom-1.5 w-3 h-3 rounded-xs border border-white cursor-nwse-resize shadow-xs ${
+                        isCheckbox ? 'bg-emerald-600' : 'bg-blue-600'
+                      }`}
+                    />
+                  )}
+                </div>
               );
             })}
           </div>
+        )}
+
+        {/* Live rubber-band rectangle while drawing a new field with the mouse */}
+        {drawDraft && drawTool !== 'none' && (
+          <div
+            style={{
+              left: `${Math.min(drawDraft.startX, drawDraft.curX) * zoomLevel}px`,
+              top: `${Math.min(drawDraft.startY, drawDraft.curY) * zoomLevel}px`,
+              width: `${Math.max(4, Math.abs(drawDraft.curX - drawDraft.startX) * zoomLevel)}px`,
+              height: `${Math.max(4, Math.abs(drawDraft.curY - drawDraft.startY) * zoomLevel)}px`,
+            }}
+            className={`absolute z-30 pointer-events-none border-2 border-dashed rounded-[2px] ${
+              drawTool === 'text'
+                ? 'border-blue-600 bg-blue-500/20'
+                : 'border-emerald-600 bg-emerald-500/20'
+            }`}
+          />
         )}
 
         {/* Empty document placeholder when unsupported type */}
@@ -620,21 +959,22 @@ export function DocumentLivePreview({
         )}
       </div>
 
-      {/* Subtle legend under the page when highlights are active */}
-      {showFieldHighlights && fieldsOnPage.length > 0 && (
+      {/* Color-coded legend under the page */}
+      {showFieldHighlights && (
         <div className="flex flex-wrap items-center justify-center gap-4 text-[11px] text-slate-500 dark:text-slate-400 pb-4">
           <span className="inline-flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-[2px] border-2 border-blue-600 bg-blue-500/20" />
-            Editando ahora
+            <span className="w-3 h-3 rounded-[2px] border border-blue-600 bg-blue-500/20" />
+            Texto / línea (arrastra para mover o redimensionar)
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-[2px] border border-emerald-600 bg-emerald-500/15" />
-            Completado
+            <span className="w-3 h-3 rounded-[2px] border border-emerald-600 bg-emerald-500/20" />
+            Casilla (✓ / ✕)
           </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-[2px] border border-dashed border-amber-500 bg-amber-400/15" />
-            Pendiente (clic para editar)
-          </span>
+          {drawTool !== 'none' && (
+            <span className="font-medium text-blue-700 dark:text-blue-400">
+              Modo dibujo activo: haz clic o arrastra sobre el PDF para crear una casilla
+            </span>
+          )}
         </div>
       )}
     </div>

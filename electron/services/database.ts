@@ -5,12 +5,15 @@ import path from 'path';
 import type {
   AppMeta,
   AppRoute,
+  CheckboxStyle,
   CreateDocumentInput,
   DiagnosisType,
   DocumentAnalysisResult,
   DocumentField,
   DocumentRecord,
   DocumentStatus,
+  FieldAlignment,
+  FieldSource,
   FieldType,
   MigrationRecord,
   SessionState,
@@ -70,6 +73,8 @@ const DEFAULT_RELEASE_NOTES: Record<string, string> = {
     'Estructura base de LibreDoc Studio para Windows, base de datos SQLite versionada en userData con migraciones automáticas y restauración exacta de sesión.',
   '0.2.0':
     'Nueva vista previa en vivo del archivo en el costado derecho del Editor (PDF, imágenes, Word .docx y texto) con marcado interactivo en tiempo real de los espacios que se están editando y sincronización bidireccional.',
+  '0.2.1':
+    'Nuevo ícono oficial de LibreDoc Studio + conversor automático de alta precisión de PDF estático a PDF rellenable (AcroForm) con detección híbrida de tablas, checkboxes ✓/✕, prefijos $, fechas, guiones tapados y ajuste interactivo sobre el documento.',
 };
 
 const MIGRATIONS: MigrationDefinition[] = [
@@ -210,11 +215,47 @@ const MIGRATIONS: MigrationDefinition[] = [
       }
     },
   },
+  {
+    version: 5,
+    name: '005_field_acroform_properties',
+    up: (db) => {
+      const columns = db
+        .prepare(`PRAGMA table_info(document_fields)`)
+        .all() as Array<{ name: string }>;
+      const colNames = new Set(columns.map((c) => c.name));
+      if (!colNames.has('font_size')) {
+        db.exec(`ALTER TABLE document_fields ADD COLUMN font_size REAL NOT NULL DEFAULT 10`);
+      }
+      if (!colNames.has('checkbox_style')) {
+        db.exec(
+          `ALTER TABLE document_fields ADD COLUMN checkbox_style TEXT NOT NULL DEFAULT 'check'`,
+        );
+      }
+      if (!colNames.has('alignment')) {
+        db.exec(`ALTER TABLE document_fields ADD COLUMN alignment TEXT NOT NULL DEFAULT 'left'`);
+      }
+      if (!colNames.has('cover_dashes')) {
+        db.exec(`ALTER TABLE document_fields ADD COLUMN cover_dashes INTEGER NOT NULL DEFAULT 0`);
+      }
+      if (!colNames.has('field_name')) {
+        db.exec(`ALTER TABLE document_fields ADD COLUMN field_name TEXT NOT NULL DEFAULT ''`);
+      }
+      if (!colNames.has('tooltip')) {
+        db.exec(`ALTER TABLE document_fields ADD COLUMN tooltip TEXT NOT NULL DEFAULT ''`);
+      }
+      if (!colNames.has('source')) {
+        db.exec(`ALTER TABLE document_fields ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`);
+      }
+    },
+  },
 ];
 
 const VALID_ROUTES = new Set<AppRoute>(['workspace', 'editor', 'updates']);
 const VALID_THEMES = new Set<ThemeMode>(['light', 'dark']);
 const VALID_FIELD_TYPES = new Set<FieldType>(['text', 'checkbox', 'date', 'multiline']);
+const VALID_CHECKBOX_STYLES = new Set<CheckboxStyle>(['check', 'cross']);
+const VALID_ALIGNMENTS = new Set<FieldAlignment>(['left', 'center', 'right']);
+const VALID_SOURCES = new Set<FieldSource>(['auto', 'manual']);
 
 export class DatabaseService {
   private readonly db: Database.Database;
@@ -764,15 +805,30 @@ export class DatabaseService {
   }
 
   public listDocumentFields(documentId: string): DocumentField[] {
-    return this.db
+    const rows = this.db
       .prepare(
         `SELECT id, document_id, page_number, label, value, field_type,
-                x, y, width, height, font_size, group_name, sort_order
+                x, y, width, height, font_size, group_name, sort_order,
+                checkbox_style, alignment, cover_dashes, field_name, tooltip, source
          FROM document_fields
          WHERE document_id = ?
          ORDER BY page_number ASC, sort_order ASC, label ASC`,
       )
       .all(documentId) as DocumentField[];
+
+    return rows.map((row) => ({
+      ...row,
+      checkbox_style: VALID_CHECKBOX_STYLES.has(row.checkbox_style as CheckboxStyle)
+        ? (row.checkbox_style as CheckboxStyle)
+        : 'check',
+      alignment: VALID_ALIGNMENTS.has(row.alignment as FieldAlignment)
+        ? (row.alignment as FieldAlignment)
+        : 'left',
+      cover_dashes: row.cover_dashes === 1 ? 1 : 0,
+      field_name: row.field_name ?? '',
+      tooltip: row.tooltip ?? '',
+      source: VALID_SOURCES.has(row.source as FieldSource) ? (row.source as FieldSource) : 'manual',
+    }));
   }
 
   public replaceDocumentFields(
@@ -783,8 +839,9 @@ export class DatabaseService {
     const insertStmt = this.db.prepare(
       `INSERT INTO document_fields (
         id, document_id, page_number, label, value, field_type,
-        x, y, width, height, font_size, group_name, sort_order
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        x, y, width, height, font_size, group_name, sort_order,
+        checkbox_style, alignment, cover_dashes, field_name, tooltip, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
     const replaceTx = this.db.transaction(() => {
@@ -795,20 +852,37 @@ export class DatabaseService {
           input.field_type && VALID_FIELD_TYPES.has(input.field_type)
             ? input.field_type
             : 'text';
+        const checkboxStyle: CheckboxStyle =
+          input.checkbox_style && VALID_CHECKBOX_STYLES.has(input.checkbox_style)
+            ? input.checkbox_style
+            : 'check';
+        const alignment: FieldAlignment =
+          input.alignment && VALID_ALIGNMENTS.has(input.alignment) ? input.alignment : 'left';
+        const coverDashes: 0 | 1 = input.cover_dashes === 1 ? 1 : 0;
+        const source: FieldSource =
+          input.source && VALID_SOURCES.has(input.source) ? input.source : 'auto';
+        const label = input.label.trim() || `Campo ${idx + 1}`;
+
         insertStmt.run(
           id,
           documentId,
           Math.max(1, input.page_number ?? 1),
-          input.label.trim() || `Campo ${idx + 1}`,
+          label,
           input.value ?? '',
           fieldType,
           input.x ?? 56,
           input.y ?? 72 + idx * 42,
           input.width ?? 220,
           input.height ?? 28,
-          input.font_size ?? 11,
+          input.font_size ?? 10,
           input.group_name?.trim() || 'Datos generales',
           input.sort_order ?? idx,
+          checkboxStyle,
+          alignment,
+          coverDashes,
+          input.field_name?.trim() || '',
+          input.tooltip?.trim() || label,
+          source,
         );
       });
 
@@ -826,7 +900,8 @@ export class DatabaseService {
     const existing = this.db
       .prepare(
         `SELECT id, document_id, page_number, label, value, field_type,
-                x, y, width, height, font_size, group_name, sort_order
+                x, y, width, height, font_size, group_name, sort_order,
+                checkbox_style, alignment, cover_dashes, field_name, tooltip, source
          FROM document_fields WHERE id = ?`,
       )
       .get(id) as DocumentField | undefined;
@@ -840,20 +915,52 @@ export class DatabaseService {
         ? input.field_type
         : existing?.field_type ?? 'text';
 
+    const checkboxStyle: CheckboxStyle =
+      input.checkbox_style && VALID_CHECKBOX_STYLES.has(input.checkbox_style)
+        ? input.checkbox_style
+        : (existing?.checkbox_style as CheckboxStyle) ?? 'check';
+
+    const alignment: FieldAlignment =
+      input.alignment && VALID_ALIGNMENTS.has(input.alignment)
+        ? input.alignment
+        : (existing?.alignment as FieldAlignment) ?? 'left';
+
+    const coverDashes: 0 | 1 =
+      input.cover_dashes !== undefined
+        ? input.cover_dashes === 1
+          ? 1
+          : 0
+        : existing?.cover_dashes === 1
+          ? 1
+          : 0;
+
+    const source: FieldSource =
+      input.source && VALID_SOURCES.has(input.source)
+        ? input.source
+        : (existing?.source as FieldSource) ?? 'manual';
+
+    const label = input.label.trim() || existing?.label || 'Campo sin título';
+
     const field: DocumentField = {
       id,
       document_id: input.document_id,
       page_number: Math.max(1, input.page_number ?? existing?.page_number ?? 1),
-      label: input.label.trim() || existing?.label || 'Campo sin título',
+      label,
       value: input.value ?? existing?.value ?? '',
       field_type: fieldType,
       x: input.x ?? existing?.x ?? 56,
       y: input.y ?? existing?.y ?? 72 + countRow.count * 52,
       width: input.width ?? existing?.width ?? 240,
-      height: input.height ?? existing?.height ?? 32,
-      font_size: input.font_size ?? existing?.font_size ?? 12,
+      height: input.height ?? existing?.height ?? 24,
+      font_size: input.font_size ?? existing?.font_size ?? 10,
       group_name: input.group_name?.trim() || existing?.group_name || 'Datos generales',
       sort_order: input.sort_order ?? existing?.sort_order ?? countRow.count,
+      checkbox_style: checkboxStyle,
+      alignment,
+      cover_dashes: coverDashes,
+      field_name: input.field_name ?? existing?.field_name ?? '',
+      tooltip: input.tooltip ?? existing?.tooltip ?? label,
+      source,
     };
 
     const upsertTx = this.db.transaction(() => {
@@ -861,8 +968,9 @@ export class DatabaseService {
         .prepare(
           `INSERT INTO document_fields (
             id, document_id, page_number, label, value, field_type,
-            x, y, width, height, font_size, group_name, sort_order
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            x, y, width, height, font_size, group_name, sort_order,
+            checkbox_style, alignment, cover_dashes, field_name, tooltip, source
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             page_number = excluded.page_number,
             label = excluded.label,
@@ -874,7 +982,13 @@ export class DatabaseService {
             height = excluded.height,
             font_size = excluded.font_size,
             group_name = excluded.group_name,
-            sort_order = excluded.sort_order`,
+            sort_order = excluded.sort_order,
+            checkbox_style = excluded.checkbox_style,
+            alignment = excluded.alignment,
+            cover_dashes = excluded.cover_dashes,
+            field_name = excluded.field_name,
+            tooltip = excluded.tooltip,
+            source = excluded.source`,
         )
         .run(
           field.id,
@@ -890,6 +1004,12 @@ export class DatabaseService {
           field.font_size,
           field.group_name,
           field.sort_order,
+          field.checkbox_style,
+          field.alignment,
+          field.cover_dashes,
+          field.field_name,
+          field.tooltip,
+          field.source,
         );
 
       this.db
@@ -905,7 +1025,8 @@ export class DatabaseService {
     const existing = this.db
       .prepare(
         `SELECT id, document_id, page_number, label, value, field_type,
-                x, y, width, height, font_size, group_name, sort_order
+                x, y, width, height, font_size, group_name, sort_order,
+                checkbox_style, alignment, cover_dashes, field_name, tooltip, source
          FROM document_fields WHERE id = ?`,
       )
       .get(fieldId) as DocumentField | undefined;

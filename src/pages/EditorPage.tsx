@@ -1,21 +1,35 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
   Check,
+  CheckSquare,
   ChevronLeft,
   ChevronRight,
   Crosshair,
+  Download,
   Eye,
   EyeOff,
   FileText,
+  Loader2,
+  MousePointer2,
   Plus,
   Search,
+  Sparkles,
+  Square,
   Trash2,
+  Type,
+  X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import type {
+  AcroFormExportResult,
+  CheckboxStyle,
   DocumentField,
   DocumentRecord,
+  FieldAlignment,
   FieldType,
   PlainTextContentResult,
   SessionState,
@@ -23,19 +37,30 @@ import type {
   SidebarTab,
   UpsertFieldInput,
 } from '../../shared/types';
-import { DocumentLivePreview } from '../components/DocumentLivePreview';
+import {
+  DocumentLivePreview,
+  type DrawnFieldRect,
+  type PreviewDrawTool,
+} from '../components/DocumentLivePreview';
 
 interface EditorPageProps {
   document: DocumentRecord | null;
   recentDocuments: DocumentRecord[];
   fields: DocumentField[];
   session: SessionState;
+  detectingFields: boolean;
+  detectProgress: { currentPage: number; totalPages: number } | null;
+  exportingPdf: boolean;
+  editorFeedback: { success: boolean; message: string; error?: string } | null;
+  onClearEditorFeedback: () => void;
   onSelectDocument: (documentId: string) => void;
   onGoToWorkspace: () => void;
   onPatchSession: (patch: SessionStatePatch) => void;
   onUpsertField: (input: UpsertFieldInput) => Promise<void>;
   onUpdateFieldValue: (fieldId: string, value: string) => Promise<void>;
   onDeleteField: (fieldId: string) => Promise<void>;
+  onDetectPdfFields: (documentId: string) => Promise<void>;
+  onExportAcroForm: (documentId: string, currentFields?: DocumentField[]) => Promise<AcroFormExportResult>;
   onReadPlainText: (documentId: string) => Promise<PlainTextContentResult | null>;
   onReadWorkingFileBytes: (documentId: string) => Promise<Uint8Array | null>;
 }
@@ -47,12 +72,19 @@ export function EditorPage({
   recentDocuments,
   fields,
   session,
+  detectingFields,
+  detectProgress,
+  exportingPdf,
+  editorFeedback,
+  onClearEditorFeedback,
   onSelectDocument,
   onGoToWorkspace,
   onPatchSession,
   onUpsertField,
   onUpdateFieldValue,
   onDeleteField,
+  onDetectPdfFields,
+  onExportAcroForm,
   onReadPlainText,
   onReadWorkingFileBytes,
 }: EditorPageProps) {
@@ -68,6 +100,7 @@ export function EditorPage({
   const [activeFieldId, setActiveFieldId] = useState<string | null>(null);
   const [hoveredFieldId, setHoveredFieldId] = useState<string | null>(null);
   const [showFieldHighlights, setShowFieldHighlights] = useState(true);
+  const [drawTool, setDrawTool] = useState<PreviewDrawTool>('none');
 
   const timersRef = useRef<Map<string, number>>(new Map());
   const scrollTimerRef = useRef<number | null>(null);
@@ -75,17 +108,29 @@ export function EditorPage({
   const fieldInputRefs = useRef<Map<string, HTMLInputElement | HTMLTextAreaElement>>(new Map());
   const restoredScrollForDocRef = useRef<string | null>(null);
 
+  const isPdfDoc = document?.file_type.toLowerCase() === 'pdf';
   const totalPages = Math.max(
     1,
     detectedPages ?? document?.analysis?.details.pageCount ?? 1,
   );
 
-  // Reset detected pages & active field when switching documents
+  // Reset per-document UI state when switching documents
   useEffect(() => {
     setDetectedPages(null);
     setActiveFieldId(null);
     setHoveredFieldId(null);
+    setDrawTool('none');
   }, [document?.id]);
+
+  // Escape key exits drawing tool mode
+  useEffect(() => {
+    if (drawTool === 'none') return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDrawTool('none');
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [drawTool]);
 
   // Load plain text content when viewing PLAIN_TEXT documents
   useEffect(() => {
@@ -191,7 +236,7 @@ export function EditorPage({
       timersRef.current.delete(fieldId);
       await onUpdateFieldValue(fieldId, nextValue);
       setSaveIndicator('saved');
-    }, 450);
+    }, 350);
 
     timersRef.current.set(fieldId, timerId);
   };
@@ -220,11 +265,9 @@ export function EditorPage({
       if (session.sidebar_tab !== 'fields') {
         onPatchSession({ sidebar_tab: 'fields' });
       }
-      // Wait a tick if switching sidebar tab, then focus & scroll the matching input
       window.setTimeout(() => {
         const inputEl = fieldInputRefs.current.get(fieldId);
         if (inputEl) {
-          inputEl.focus();
           inputEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
       }, 30);
@@ -245,14 +288,138 @@ export function EditorPage({
       field_type: newType,
       x: 56,
       y: Math.min(700, 84 + samePageCount * 42),
-      width: newType === 'checkbox' ? 24 : 240,
-      height: newType === 'multiline' ? 56 : 26,
+      width: newType === 'checkbox' ? 18 : 220,
+      height: newType === 'multiline' ? 56 : newType === 'checkbox' ? 18 : 20,
+      font_size: 9.5,
+      checkbox_style: 'check',
+      alignment: newType === 'checkbox' ? 'center' : 'left',
+      cover_dashes: 0,
       group_name: newGroup.trim() || 'Datos generales',
+      source: 'manual',
     });
 
     setNewLabel('');
     setShowAddField(false);
     setSaveIndicator('saved');
+  };
+
+  const handleMoveOrResizeField = useCallback(
+    async (
+      field: DocumentField,
+      geometry: { x: number; y: number; width: number; height: number },
+    ) => {
+      setSaveIndicator('saving');
+      await onUpsertField({
+        ...field,
+        value: draftValues[field.id] ?? field.value,
+        x: geometry.x,
+        y: geometry.y,
+        width: geometry.width,
+        height: geometry.height,
+        source: 'manual',
+      });
+      setSaveIndicator('saved');
+    },
+    [draftValues, onUpsertField],
+  );
+
+  const handleCreateDrawnField = useCallback(
+    async (rect: DrawnFieldRect) => {
+      if (!document) return;
+      const samePageCount = fields.filter((f) => f.page_number === session.active_page).length;
+      const isCheck = rect.field_type === 'checkbox';
+      const defaultLabel = isCheck
+        ? rect.checkbox_style === 'cross'
+          ? `Casilla X (Pág. ${session.active_page} #${samePageCount + 1})`
+          : `Casilla ✓ (Pág. ${session.active_page} #${samePageCount + 1})`
+        : `Campo manual (Pág. ${session.active_page} #${samePageCount + 1})`;
+
+      const dynamicFont = Number(
+        Math.max(6.5, Math.min(10, rect.height * 0.62)).toFixed(1),
+      );
+
+      setSaveIndicator('saving');
+      await onUpsertField({
+        document_id: document.id,
+        page_number: session.active_page,
+        label: defaultLabel,
+        value: isCheck ? 'false' : '',
+        field_type: rect.field_type,
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        font_size: rect.field_type === 'multiline' ? 9.5 : dynamicFont,
+        checkbox_style: rect.checkbox_style ?? 'check',
+        alignment: isCheck ? 'center' : 'left',
+        cover_dashes: 0,
+        group_name: `Página ${session.active_page} (Manual)`,
+        tooltip: defaultLabel,
+        source: 'manual',
+      });
+      setSaveIndicator('saved');
+      setDrawTool('none');
+    },
+    [document, fields, session.active_page, onUpsertField],
+  );
+
+  const handleUpdateFieldProperty = useCallback(
+    async (
+      field: DocumentField,
+      patch: Partial<
+        Pick<
+          DocumentField,
+          'field_type' | 'checkbox_style' | 'alignment' | 'font_size' | 'cover_dashes' | 'label'
+        >
+      >,
+    ) => {
+      setSaveIndicator('saving');
+      const nextType = patch.field_type ?? field.field_type;
+      const currentVal = draftValues[field.id] ?? field.value;
+      const nextVal =
+        nextType === 'checkbox'
+          ? currentVal === 'true'
+            ? 'true'
+            : 'false'
+          : field.field_type === 'checkbox'
+            ? ''
+            : currentVal;
+
+      await onUpsertField({
+        ...field,
+        ...patch,
+        value: nextVal,
+        source: 'manual',
+      });
+      setSaveIndicator('saved');
+    },
+    [draftValues, onUpsertField],
+  );
+
+  const handleDeleteFieldSafe = useCallback(
+    async (fieldId: string) => {
+      await onDeleteField(fieldId);
+      setActiveFieldId((prev) => (prev === fieldId ? null : prev));
+    },
+    [onDeleteField],
+  );
+
+  const handleExportWithDrafts = async () => {
+    if (!document) return;
+    // Flush any pending debounced text edits and merge draftValues so exported PDF has exact latest values
+    for (const [fId, timer] of timersRef.current.entries()) {
+      window.clearTimeout(timer);
+      timersRef.current.delete(fId);
+      const val = draftValues[fId];
+      if (val !== undefined) {
+        await onUpdateFieldValue(fId, val);
+      }
+    }
+    const mergedFields: DocumentField[] = fields.map((f) => ({
+      ...f,
+      value: draftValues[f.id] ?? f.value,
+    }));
+    await onExportAcroForm(document.id, mergedFields);
   };
 
   const handleCanvasScroll = () => {
@@ -299,8 +466,8 @@ export function EditorPage({
             Ningún documento activo en el editor
           </h1>
           <p className="mt-1.5 text-sm text-slate-600 dark:text-slate-400">
-            Selecciona un documento reciente o carga uno en Inicio para diagnosticarlo y editar sus
-            campos junto a la vista previa en vivo.
+            Selecciona un documento reciente o carga un PDF en Inicio para detectar sus casillas y
+            editarlo con vista previa en vivo.
           </p>
 
           {recentDocuments.length > 0 && (
@@ -344,7 +511,7 @@ export function EditorPage({
 
   return (
     <div className="h-full flex flex-col lg:flex-row min-h-0">
-      {/* Left Panel: Vista General de Datos (Editable Fields) */}
+      {/* Left Panel: Vista General de Datos (Editable Fields & Actions) */}
       <section className="w-full lg:w-[390px] shrink-0 flex flex-col bg-white dark:bg-slate-900 border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800 min-h-0">
         <div className="p-4 border-b border-slate-200 dark:border-slate-800 space-y-3">
           <div className="flex items-center justify-between gap-2">
@@ -364,6 +531,80 @@ export function EditorPage({
               )}
             </span>
           </div>
+
+          {/* Primary AcroForm Auto-Detect & Export Action Buttons for PDFs */}
+          {isPdfDoc && (
+            <div className="grid grid-cols-1 gap-2">
+              <button
+                type="button"
+                disabled={detectingFields || exportingPdf}
+                onClick={() => void onDetectPdfFields(document.id)}
+                className="w-full inline-flex items-center justify-center gap-2 h-8 px-3 rounded-lg text-xs font-medium bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white text-white dark:text-slate-950 disabled:opacity-55 transition-colors"
+              >
+                {detectingFields ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                    <span>
+                      {detectProgress
+                        ? `Analizando pág. ${detectProgress.currentPage}/${detectProgress.totalPages}...`
+                        : 'Detectando casillas...'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>Detectar casillas automáticamente</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                disabled={exportingPdf || detectingFields || fields.length === 0}
+                onClick={() => void handleExportWithDrafts()}
+                className="w-full inline-flex items-center justify-center gap-2 h-8 px-3 rounded-lg text-xs font-medium bg-blue-700 hover:bg-blue-800 dark:bg-blue-600 dark:hover:bg-blue-500 text-white disabled:opacity-50 transition-colors"
+              >
+                {exportingPdf ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                    <span>Generando PDF AcroForm...</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>Exportar PDF rellenable (AcroForm)</span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* Feedback alert for detection / export */}
+          {editorFeedback && (
+            <div
+              role="status"
+              className={`p-2.5 rounded-lg border text-xs flex items-start justify-between gap-2 ${
+                editorFeedback.success
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200'
+                  : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800 text-red-900 dark:text-red-200'
+              }`}
+            >
+              <div className="min-w-0 space-y-0.5">
+                <p className="font-medium leading-snug">{editorFeedback.message}</p>
+                {editorFeedback.error && (
+                  <p className="opacity-85 break-words">{editorFeedback.error}</p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={onClearEditorFeedback}
+                aria-label="Cerrar aviso"
+                className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 shrink-0"
+              >
+                <X className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            </div>
+          )}
 
           <div
             role="tablist"
@@ -420,7 +661,7 @@ export function EditorPage({
               <button
                 type="button"
                 onClick={() => setShowAddField((prev) => !prev)}
-                className="inline-flex items-center gap-1 h-8 px-2.5 rounded-md text-xs font-medium bg-blue-700 hover:bg-blue-800 dark:bg-blue-600 dark:hover:bg-blue-500 text-white transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1 h-8 px-2.5 rounded-md text-xs font-medium bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 transition-colors whitespace-nowrap shrink-0"
               >
                 <Plus className="w-3.5 h-3.5" aria-hidden="true" />
                 <span>Campo</span>
@@ -511,18 +752,20 @@ export function EditorPage({
                     Sin campos registrados todavía
                   </p>
                   <p className="text-xs text-slate-500 dark:text-slate-400 max-w-xs mx-auto">
-                    Añade un campo manualmente con el botón superior o ejecuta OCR / AcroForm desde
-                    Inicio para marcar los espacios sobre la vista derecha.
+                    Pulsa «Detectar casillas automáticamente» o dibuja casillas directamente sobre
+                    el documento en el panel derecho.
                   </p>
                 </div>
               ) : (
                 groupedFields.map(([groupName, groupItems]) => (
                   <div key={groupName} className="space-y-2.5">
                     <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800 pb-1.5">
-                      <span className="font-medium text-slate-700 dark:text-slate-300">
+                      <span className="font-medium text-slate-700 dark:text-slate-300 truncate">
                         {groupName}
                       </span>
-                      <span className="font-mono tabular-nums">{groupItems.length}</span>
+                      <span className="font-mono tabular-nums shrink-0 ml-2">
+                        {groupItems.length}
+                      </span>
                     </div>
 
                     <div className="space-y-2.5">
@@ -530,10 +773,8 @@ export function EditorPage({
                         const val = draftValues[field.id] ?? field.value;
                         const isActive = activeFieldId === field.id;
                         const isHovered = hoveredFieldId === field.id;
-                        const isFilled =
-                          field.field_type === 'checkbox'
-                            ? val === 'true'
-                            : val.trim().length > 0;
+                        const isCheckbox = field.field_type === 'checkbox';
+                        const isFilled = isCheckbox ? val === 'true' : val.trim().length > 0;
 
                         return (
                           <div
@@ -542,7 +783,9 @@ export function EditorPage({
                             onMouseLeave={() => setHoveredFieldId(null)}
                             className={`p-2.5 rounded-lg border transition-colors space-y-1.5 ${
                               isActive
-                                ? 'border-blue-500 bg-blue-50/70 dark:bg-blue-950/35 dark:border-blue-500'
+                                ? isCheckbox
+                                  ? 'border-emerald-500 bg-emerald-50/70 dark:bg-emerald-950/30 dark:border-emerald-500'
+                                  : 'border-blue-500 bg-blue-50/70 dark:bg-blue-950/35 dark:border-blue-500'
                                 : isHovered
                                   ? 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40'
                                   : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900'
@@ -555,11 +798,15 @@ export function EditorPage({
                               >
                                 <span
                                   className={`w-2 h-2 rounded-full shrink-0 ${
-                                    isActive
-                                      ? 'bg-blue-600'
-                                      : isFilled
-                                        ? 'bg-emerald-500'
-                                        : 'bg-amber-400'
+                                    isCheckbox
+                                      ? isFilled
+                                        ? 'bg-emerald-600'
+                                        : 'bg-emerald-400'
+                                      : isActive
+                                        ? 'bg-blue-600'
+                                        : isFilled
+                                          ? 'bg-blue-500'
+                                          : 'bg-amber-400'
                                   }`}
                                   aria-hidden="true"
                                 />
@@ -577,7 +824,7 @@ export function EditorPage({
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => void onDeleteField(field.id)}
+                                  onClick={() => void handleDeleteFieldSafe(field.id)}
                                   aria-label={`Eliminar campo ${field.label}`}
                                   className="text-slate-400 hover:text-red-600 dark:hover:text-red-400 transition-colors"
                                 >
@@ -601,7 +848,7 @@ export function EditorPage({
                                 placeholder="Escribe el contenido del campo..."
                                 className="w-full px-2.5 py-2 rounded-md text-sm bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600 dark:focus:ring-blue-400"
                               />
-                            ) : field.field_type === 'checkbox' ? (
+                            ) : isCheckbox ? (
                               <label className="flex items-center gap-2 py-1 text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
                                 <input
                                   ref={(el) => {
@@ -615,9 +862,15 @@ export function EditorPage({
                                   onChange={(e) =>
                                     scheduleFieldSave(field.id, e.target.checked ? 'true' : 'false')
                                   }
-                                  className="w-4 h-4 rounded border-slate-300 dark:border-slate-700 text-blue-600 focus:ring-blue-600"
+                                  className="w-4 h-4 rounded border-slate-300 dark:border-slate-700 text-emerald-600 focus:ring-emerald-600"
                                 />
-                                <span>{val === 'true' ? 'Marcado' : 'Sin marcar'}</span>
+                                <span>
+                                  {val === 'true'
+                                    ? field.checkbox_style === 'cross'
+                                      ? 'Marcado (✕)'
+                                      : 'Marcado (✓)'
+                                    : 'Sin marcar'}
+                                </span>
                               </label>
                             ) : (
                               <input
@@ -695,10 +948,12 @@ export function EditorPage({
         )}
       </section>
 
-      {/* Right Panel: Live Document Preview with Highlighted Editable Spaces */}
+      {/* Right Panel: Interactive Visual PDF Editor + Draw Tools + Quick Properties Bar */}
       <section className="flex-1 flex flex-col min-w-0 min-h-0 bg-slate-100 dark:bg-slate-950">
-        <div className="h-12 px-4 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
-          <div className="flex items-center gap-2 min-w-0">
+        {/* Top Toolbar: Pagination + Draw Tools + Highlights Toggle + Zoom */}
+        <div className="min-h-12 px-4 py-1.5 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
+          {/* Page navigation */}
+          <div className="flex items-center gap-1.5">
             <button
               type="button"
               onClick={() => handleSetPage(session.active_page - 1)}
@@ -709,7 +964,7 @@ export function EditorPage({
               <ChevronLeft className="w-4 h-4" aria-hidden="true" />
             </button>
             <span className="text-xs font-mono tabular-nums text-slate-700 dark:text-slate-200 whitespace-nowrap">
-              Página {Math.min(session.active_page, totalPages)} / {totalPages}
+              Pág. {Math.min(session.active_page, totalPages)} / {totalPages}
             </span>
             <button
               type="button"
@@ -720,16 +975,68 @@ export function EditorPage({
             >
               <ChevronRight className="w-4 h-4" aria-hidden="true" />
             </button>
-
-            {activeFieldObj && (
-              <span className="hidden md:inline-flex items-center gap-1.5 ml-2 pl-3 border-l border-slate-200 dark:border-slate-800 text-xs text-blue-700 dark:text-blue-400 truncate">
-                <Crosshair className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                <span className="truncate">Editando: {activeFieldObj.label}</span>
-              </span>
-            )}
           </div>
 
-          <div className="flex items-center gap-2.5 shrink-0">
+          {/* Draw tools (Mover / + Texto / + Check ✓ / + Cruz ✕) */}
+          {isPdfDoc && (
+            <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-950 p-0.5 rounded-lg border border-slate-200 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setDrawTool('none')}
+                title="Seleccionar, mover y redimensionar casillas"
+                className={`inline-flex items-center gap-1 h-7 px-2 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${
+                  drawTool === 'none'
+                    ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                }`}
+              >
+                <MousePointer2 className="w-3.5 h-3.5" aria-hidden="true" />
+                <span className="hidden xl:inline">Mover</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDrawTool((prev) => (prev === 'text' ? 'none' : 'text'))}
+                title="Dibujar nuevo campo de texto con el mouse"
+                className={`inline-flex items-center gap-1 h-7 px-2 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${
+                  drawTool === 'text'
+                    ? 'bg-blue-700 text-white shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-blue-700 dark:hover:text-blue-400'
+                }`}
+              >
+                <Type className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>+ Texto</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDrawTool((prev) => (prev === 'check' ? 'none' : 'check'))}
+                title="Dibujar casilla de verificación (✓)"
+                className={`inline-flex items-center gap-1 h-7 px-2 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${
+                  drawTool === 'check'
+                    ? 'bg-emerald-700 text-white shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-emerald-700 dark:hover:text-emerald-400'
+                }`}
+              >
+                <CheckSquare className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>+ Check ✓</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDrawTool((prev) => (prev === 'cross' ? 'none' : 'cross'))}
+                title="Dibujar casilla con cruz (✕)"
+                className={`inline-flex items-center gap-1 h-7 px-2 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${
+                  drawTool === 'cross'
+                    ? 'bg-emerald-700 text-white shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-emerald-700 dark:hover:text-emerald-400'
+                }`}
+              >
+                <Square className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>+ Cruz ✕</span>
+              </button>
+            </div>
+          )}
+
+          {/* Visibility & Zoom */}
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => setShowFieldHighlights((prev) => !prev)}
@@ -744,10 +1051,10 @@ export function EditorPage({
               ) : (
                 <EyeOff className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               )}
-              <span className="hidden sm:inline">Marcar espacios</span>
+              <span className="hidden sm:inline">Capas</span>
             </button>
 
-            <div className="flex items-center gap-1 border-l border-slate-200 dark:border-slate-800 pl-2.5">
+            <div className="flex items-center gap-1 border-l border-slate-200 dark:border-slate-800 pl-2">
               <button
                 type="button"
                 onClick={() => handleSetZoom(session.zoom_level - 0.25)}
@@ -782,6 +1089,135 @@ export function EditorPage({
           </div>
         </div>
 
+        {/* Quick Properties Bar when a field is selected */}
+        {activeFieldObj && (
+          <div className="px-4 py-2 bg-slate-50 dark:bg-slate-900/90 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0">
+            <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+              <span className="font-medium text-slate-700 dark:text-slate-200 truncate max-w-[180px]">
+                {activeFieldObj.label}
+              </span>
+
+              {/* Type selector */}
+              <select
+                aria-label="Tipo de campo"
+                value={
+                  activeFieldObj.field_type === 'checkbox'
+                    ? activeFieldObj.checkbox_style === 'cross'
+                      ? 'checkbox_cross'
+                      : 'checkbox_check'
+                    : activeFieldObj.field_type
+                }
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === 'checkbox_check' || v === 'checkbox_cross') {
+                    const style: CheckboxStyle = v === 'checkbox_cross' ? 'cross' : 'check';
+                    void handleUpdateFieldProperty(activeFieldObj, {
+                      field_type: 'checkbox',
+                      checkbox_style: style,
+                      alignment: 'center',
+                    });
+                  } else {
+                    void handleUpdateFieldProperty(activeFieldObj, {
+                      field_type: v as FieldType,
+                    });
+                  }
+                }}
+                className="h-7 px-2 rounded-md bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200"
+              >
+                <option value="text">Texto</option>
+                <option value="multiline">Multilínea</option>
+                <option value="date">Fecha</option>
+                <option value="checkbox_check">Casilla (✓)</option>
+                <option value="checkbox_cross">Casilla (✕)</option>
+              </select>
+
+              {/* Alignment controls (for text fields) */}
+              {activeFieldObj.field_type !== 'checkbox' && (
+                <>
+                  <div className="inline-flex items-center rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 overflow-hidden">
+                    {(['left', 'center', 'right'] as FieldAlignment[]).map((align) => {
+                      const active = (activeFieldObj.alignment ?? 'left') === align;
+                      return (
+                        <button
+                          key={align}
+                          type="button"
+                          onClick={() =>
+                            void handleUpdateFieldProperty(activeFieldObj, { alignment: align })
+                          }
+                          title={
+                            align === 'left'
+                              ? 'Alinear a la izquierda'
+                              : align === 'center'
+                                ? 'Centrar'
+                                : 'Alinear a la derecha'
+                          }
+                          className={`p-1.5 transition-colors ${
+                            active
+                              ? 'bg-blue-600 text-white'
+                              : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                          }`}
+                        >
+                          {align === 'left' ? (
+                            <AlignLeft className="w-3.5 h-3.5" aria-hidden="true" />
+                          ) : align === 'center' ? (
+                            <AlignCenter className="w-3.5 h-3.5" aria-hidden="true" />
+                          ) : (
+                            <AlignRight className="w-3.5 h-3.5" aria-hidden="true" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Font size selector */}
+                  <label className="inline-flex items-center gap-1.5 text-slate-600 dark:text-slate-400">
+                    <span>Fuente</span>
+                    <input
+                      type="number"
+                      min={6}
+                      max={18}
+                      step={0.5}
+                      value={activeFieldObj.font_size || 9.5}
+                      onChange={(e) => {
+                        const parsed = Number(e.target.value);
+                        if (Number.isFinite(parsed) && parsed >= 6 && parsed <= 18) {
+                          void handleUpdateFieldProperty(activeFieldObj, { font_size: parsed });
+                        }
+                      }}
+                      className="w-14 h-7 px-1.5 rounded-md font-mono tabular-nums bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100"
+                    />
+                    <span>pt</span>
+                  </label>
+
+                  {/* Cover dashes toggle */}
+                  <label className="inline-flex items-center gap-1.5 text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={activeFieldObj.cover_dashes === 1}
+                      onChange={(e) =>
+                        void handleUpdateFieldProperty(activeFieldObj, {
+                          cover_dashes: e.target.checked ? 1 : 0,
+                        })
+                      }
+                      className="w-3.5 h-3.5 rounded border-slate-300 dark:border-slate-700 text-blue-600"
+                    />
+                    <span>Tapar guiones</span>
+                  </label>
+                </>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void handleDeleteFieldSafe(activeFieldObj.id)}
+              className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/50 border border-transparent hover:border-red-200 dark:hover:border-red-900 transition-colors shrink-0"
+            >
+              <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Eliminar</span>
+            </button>
+          </div>
+        )}
+
         <div
           ref={canvasRef}
           onScroll={handleCanvasScroll}
@@ -796,11 +1232,15 @@ export function EditorPage({
             activeFieldId={activeFieldId}
             hoveredFieldId={hoveredFieldId}
             showFieldHighlights={showFieldHighlights}
+            drawTool={drawTool}
             plainTextData={plainTextData}
             onReadWorkingFileBytes={onReadWorkingFileBytes}
             onTotalPagesDetected={handleTotalPagesDetected}
             onSelectFieldFromPreview={handleSelectFieldFromPreview}
             onHoverField={setHoveredFieldId}
+            onMoveOrResizeField={handleMoveOrResizeField}
+            onCreateDrawnField={handleCreateDrawnField}
+            onDeleteField={(id) => void handleDeleteFieldSafe(id)}
           />
         </div>
       </section>

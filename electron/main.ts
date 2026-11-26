@@ -2,8 +2,10 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import type {
+  AcroFormExportResult,
   AcroFormExtractionResult,
   CreateDocumentInput,
+  DocumentField,
   DocumentRecord,
   DocumentStatus,
   OcrRunResult,
@@ -13,6 +15,7 @@ import type {
   UnlockResult,
   UpsertFieldInput,
 } from '../shared/types';
+import { buildAcroFormPdf } from '../shared/acroFormBuilder';
 import {
   analyzeDocumentFile,
   decodePlainTextBuffer,
@@ -98,8 +101,24 @@ async function ingestAndAnalyzeFile(selectedPath: string): Promise<DocumentRecor
   return updated ?? created;
 }
 
+function resolveAppIconPath(): string | undefined {
+  const candidates = [
+    typeof process.resourcesPath === 'string'
+      ? path.join(process.resourcesPath, 'icons', 'icon.ico')
+      : '',
+    typeof process.resourcesPath === 'string'
+      ? path.join(process.resourcesPath, 'icons', 'icon.png')
+      : '',
+    path.join(process.cwd(), 'resources', 'icons', 'icon.ico'),
+    path.join(process.cwd(), 'resources', 'icons', 'icon.png'),
+  ].filter(Boolean);
+
+  return candidates.find((p) => fs.existsSync(p));
+}
+
 function createMainWindow(): BrowserWindow {
   const session = getDb().getSessionState();
+  const iconPath = resolveAppIconPath();
 
   const win = new BrowserWindow({
     width: 1320,
@@ -107,6 +126,7 @@ function createMainWindow(): BrowserWindow {
     minWidth: 1024,
     minHeight: 680,
     title: 'LibreDoc Studio',
+    icon: iconPath,
     backgroundColor: session.theme === 'dark' ? '#020617' : '#f8fafc',
     autoHideMenuBar: true,
     show: false,
@@ -454,6 +474,13 @@ function registerIpcHandlers(): void {
     return getDb().listDocumentFields(documentId);
   });
 
+  ipcMain.handle(
+    'fields:replace-all',
+    (_event, documentId: string, inputs: UpsertFieldInput[]) => {
+      return getDb().replaceDocumentFields(documentId, inputs);
+    },
+  );
+
   ipcMain.handle('fields:upsert', (_event, input: UpsertFieldInput) => {
     return getDb().upsertDocumentField(input);
   });
@@ -465,6 +492,101 @@ function registerIpcHandlers(): void {
   ipcMain.handle('fields:delete', (_event, fieldId: string) => {
     return getDb().deleteDocumentField(fieldId);
   });
+
+  ipcMain.handle(
+    'pdf:export-acroform',
+    async (
+      _event,
+      documentId: string,
+      overrideFields?: DocumentField[],
+    ): Promise<AcroFormExportResult> => {
+      const doc = getDb().getDocument(documentId);
+      if (!doc) {
+        return {
+          success: false,
+          fieldsExported: 0,
+          message: 'Documento no encontrado en SQLite.',
+          error: 'El documento seleccionado ya no existe.',
+        };
+      }
+
+      const sourcePath = fs.existsSync(doc.working_path) ? doc.working_path : doc.original_path;
+      if (!fs.existsSync(sourcePath)) {
+        return {
+          success: false,
+          fieldsExported: 0,
+          message: 'No se encontró el archivo PDF original en el workspace.',
+          error: `Ruta no encontrada: ${sourcePath}`,
+        };
+      }
+
+      const fieldsToWrite =
+        Array.isArray(overrideFields) && overrideFields.length > 0
+          ? overrideFields
+          : getDb().listDocumentFields(doc.id);
+
+      if (fieldsToWrite.length === 0) {
+        return {
+          success: false,
+          fieldsExported: 0,
+          message: 'No hay campos definidos para exportar.',
+          error: 'Detecta casillas automáticamente o dibuja al menos un campo antes de exportar.',
+        };
+      }
+
+      const baseName = path.basename(doc.original_name, path.extname(doc.original_name));
+      const suggestedName = `${baseName}-rellenable.pdf`;
+      const defaultDir =
+        doc.original_path && fs.existsSync(path.dirname(doc.original_path))
+          ? path.dirname(doc.original_path)
+          : app.getPath('documents');
+
+      const owner = mainWindow ?? BrowserWindow.getFocusedWindow() ?? undefined;
+      const saveDialogOptions: Electron.SaveDialogOptions = {
+        title: 'Guardar PDF rellenable (AcroForm)',
+        defaultPath: path.join(defaultDir, suggestedName),
+        filters: [{ name: 'Documento PDF rellenable', extensions: ['pdf'] }],
+      };
+
+      const saveChoice = owner
+        ? await dialog.showSaveDialog(owner, saveDialogOptions)
+        : await dialog.showSaveDialog(saveDialogOptions);
+
+      if (saveChoice.canceled || !saveChoice.filePath) {
+        return {
+          success: false,
+          canceled: true,
+          fieldsExported: 0,
+          message: 'Exportación cancelada por el usuario.',
+        };
+      }
+
+      try {
+        const rawBytes = fs.readFileSync(sourcePath);
+        const { pdfBytes, fieldsWritten } = await buildAcroFormPdf({
+          originalPdfBytes: new Uint8Array(rawBytes.buffer, rawBytes.byteOffset, rawBytes.byteLength),
+          fields: fieldsToWrite,
+        });
+
+        fs.writeFileSync(saveChoice.filePath, Buffer.from(pdfBytes));
+        getDb().updateDocument(doc.id, { status: 'exported' });
+
+        return {
+          success: true,
+          outputPath: saveChoice.filePath,
+          fieldsExported: fieldsWritten,
+          message: `PDF rellenable guardado correctamente con ${fieldsWritten} campo(s) AcroForm.`,
+        };
+      } catch (err) {
+        return {
+          success: false,
+          fieldsExported: 0,
+          message: 'Error al generar el PDF rellenable AcroForm.',
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
 
   ipcMain.handle('versions:list', () => {
     return getDb().listVersionHistory();

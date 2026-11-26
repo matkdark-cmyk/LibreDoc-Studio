@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, RotateCcw, X } from 'lucide-react';
 import type {
+  AcroFormExportResult,
   AppRoute,
   CreateDocumentInput,
   DocumentField,
@@ -24,6 +25,7 @@ import { EditorPage } from './pages/EditorPage';
 import { UpdaterSplash } from './pages/UpdaterSplash';
 import { UpdatesPage } from './pages/UpdatesPage';
 import { WorkspacePage } from './pages/WorkspacePage';
+import { detectStaticPdfFormFields } from './services/pdfFormDetector';
 import { renderPdfPagesForOcr } from './services/pdfPageRenderer';
 import {
   getLibreDocBridge,
@@ -86,6 +88,17 @@ function MainApp() {
   const [runningOcr, setRunningOcr] = useState(false);
   const [extractingAcroForm, setExtractingAcroForm] = useState(false);
   const [reanalyzing, setReanalyzing] = useState(false);
+  const [detectingFields, setDetectingFields] = useState(false);
+  const [detectProgress, setDetectProgress] = useState<{
+    currentPage: number;
+    totalPages: number;
+  } | null>(null);
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const [editorFeedback, setEditorFeedback] = useState<{
+    success: boolean;
+    message: string;
+    error?: string;
+  } | null>(null);
   const [ocrProgress, setOcrProgress] = useState<OcrProgressEvent | null>(null);
   const [ingestError, setIngestError] = useState<string | null>(null);
   const [cardFeedback, setCardFeedback] = useState<CardFeedback | null>(null);
@@ -250,8 +263,73 @@ function MainApp() {
     [patchSession],
   );
 
+  const runStaticPdfAutoDetection = useCallback(
+    async (documentId: string, onlyIfEmpty: boolean) => {
+      const targetDoc = (await bridge.getDocument(documentId)) ?? null;
+      if (!targetDoc || targetDoc.file_type.toLowerCase() !== 'pdf') return;
+      if (targetDoc.diagnosis_type === 'PDF_ENCRYPTED_OPEN') return;
+
+      if (onlyIfEmpty) {
+        const existingFields = await bridge.listDocumentFields(documentId);
+        const nativeAcroCount = targetDoc.analysis?.details.acroFormFieldCount ?? 0;
+        // Guardrail #1: never overwrite previously saved SQLite fields or native AcroForm fields
+        if (existingFields.length > 0 || nativeAcroCount > 0) {
+          return;
+        }
+      }
+
+      setDetectingFields(true);
+      setDetectProgress(null);
+      setEditorFeedback(null);
+
+      try {
+        const pdfBytes = await bridge.readWorkingFileBytes(documentId);
+        if (!pdfBytes || pdfBytes.byteLength === 0) {
+          throw new Error('No se pudieron leer los bytes del PDF desde el workspace.');
+        }
+
+        const result = await detectStaticPdfFormFields({
+          documentId,
+          pdfBytes,
+          onProgress: (currentPage, totalPages) => {
+            setDetectProgress({ currentPage, totalPages });
+          },
+        });
+
+        const saved = await bridge.replaceDocumentFields(documentId, result.fields);
+        setFields(saved);
+        const updatedDocs = await bridge.listDocuments();
+        setDocuments(updatedDocs);
+
+        const firstFieldPage = saved.length > 0 ? saved[0].page_number : 1;
+        if (saved.length > 0 && onlyIfEmpty) {
+          patchSession({ active_page: firstFieldPage, scroll_position: 0 });
+        }
+
+        setEditorFeedback({
+          success: true,
+          message:
+            saved.length > 0
+              ? `Se detectaron ${saved.length} casilla(s) en ${result.pageCount} página(s). Puedes moverlas, ajustarlas o exportar el PDF rellenable.`
+              : `Análisis completado (${result.pageCount} páginas) sin casillas vacías detectadas. Puedes dibujarlas manualmente con + Texto / + Check.`,
+        });
+      } catch (err) {
+        setEditorFeedback({
+          success: false,
+          message: 'No se pudo completar la detección automática de casillas.',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        setDetectingFields(false);
+        setDetectProgress(null);
+      }
+    },
+    [bridge, patchSession],
+  );
+
   const handleOpenDocument = useCallback(
     async (documentId: string) => {
+      setEditorFeedback(null);
       await loadFieldsForDocument(documentId);
       patchSession({
         active_document_id: documentId,
@@ -259,8 +337,57 @@ function MainApp() {
         active_page: 1,
         scroll_position: 0,
       });
+      await runStaticPdfAutoDetection(documentId, true);
     },
-    [loadFieldsForDocument, patchSession],
+    [loadFieldsForDocument, patchSession, runStaticPdfAutoDetection],
+  );
+
+  const handleDetectPdfFields = useCallback(
+    async (documentId: string) => {
+      await runStaticPdfAutoDetection(documentId, false);
+    },
+    [runStaticPdfAutoDetection],
+  );
+
+  const handleExportAcroForm = useCallback(
+    async (
+      documentId: string,
+      currentFields?: DocumentField[],
+    ): Promise<AcroFormExportResult> => {
+      setExportingPdf(true);
+      setEditorFeedback(null);
+      try {
+        const result = await bridge.exportAcroFormPdf(documentId, currentFields);
+        if (!result.canceled) {
+          setEditorFeedback({
+            success: result.success,
+            message: result.message,
+            error: result.error,
+          });
+        }
+        if (result.success) {
+          const updatedDocs = await bridge.listDocuments();
+          setDocuments(updatedDocs);
+        }
+        return result;
+      } catch (err) {
+        const failed: AcroFormExportResult = {
+          success: false,
+          fieldsExported: 0,
+          message: 'Error inesperado al exportar el PDF rellenable.',
+          error: err instanceof Error ? err.message : String(err),
+        };
+        setEditorFeedback({
+          success: false,
+          message: failed.message,
+          error: failed.error,
+        });
+        return failed;
+      } finally {
+        setExportingPdf(false);
+      }
+    },
+    [bridge],
   );
 
   const handleCreateDocument = useCallback(
@@ -292,6 +419,15 @@ function MainApp() {
       setDocuments(updatedList);
       setDiagnostics(diag);
       setSelectedDiagnosisDocId(created.id);
+
+      // For ready static PDFs, open the visual Editor directly and auto-detect fields
+      if (
+        created.file_type.toLowerCase() === 'pdf' &&
+        created.diagnosis_type === 'PDF_NATIVE_EDITABLE' &&
+        (created.analysis?.details.acroFormFieldCount ?? 0) === 0
+      ) {
+        await handleOpenDocument(created.id);
+      }
     } catch (err) {
       setIngestError(
         err instanceof Error ? err.message : 'No se pudo analizar el archivo seleccionado.',
@@ -299,7 +435,7 @@ function MainApp() {
     } finally {
       setIngesting(false);
     }
-  }, [bridge]);
+  }, [bridge, handleOpenDocument]);
 
   const handleIngestDroppedFiles = useCallback(
     async (files: FileList) => {
@@ -333,6 +469,13 @@ function MainApp() {
         setDiagnostics(diag);
         if (lastCreated) {
           setSelectedDiagnosisDocId(lastCreated.id);
+          if (
+            lastCreated.file_type.toLowerCase() === 'pdf' &&
+            lastCreated.diagnosis_type === 'PDF_NATIVE_EDITABLE' &&
+            (lastCreated.analysis?.details.acroFormFieldCount ?? 0) === 0
+          ) {
+            await handleOpenDocument(lastCreated.id);
+          }
         }
       } catch (err) {
         setIngestError(
@@ -342,7 +485,7 @@ function MainApp() {
         setIngesting(false);
       }
     },
-    [bridge, electronMode],
+    [bridge, electronMode, handleOpenDocument],
   );
 
   const handleSelectDiagnosisDoc = useCallback((documentId: string | null) => {
@@ -809,12 +952,19 @@ function MainApp() {
               recentDocuments={documents}
               fields={fields}
               session={session}
+              detectingFields={detectingFields}
+              detectProgress={detectProgress}
+              exportingPdf={exportingPdf}
+              editorFeedback={editorFeedback}
+              onClearEditorFeedback={() => setEditorFeedback(null)}
               onSelectDocument={(id) => void handleOpenDocument(id)}
               onGoToWorkspace={() => handleNavigate('workspace')}
               onPatchSession={patchSession}
               onUpsertField={handleUpsertField}
               onUpdateFieldValue={handleUpdateFieldValue}
               onDeleteField={handleDeleteField}
+              onDetectPdfFields={handleDetectPdfFields}
+              onExportAcroForm={handleExportAcroForm}
               onReadPlainText={handleReadPlainText}
               onReadWorkingFileBytes={handleReadWorkingFileBytes}
             />

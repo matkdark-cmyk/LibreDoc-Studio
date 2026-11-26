@@ -51,24 +51,12 @@ export function Sidebar({
     <aside className="w-64 shrink-0 flex flex-col justify-between bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 select-none">
       <div>
         <div className="h-14 px-5 flex items-center gap-3 border-b border-slate-200 dark:border-slate-800">
-          <div className="w-7 h-7 rounded-md bg-blue-700 dark:bg-blue-600 text-white flex items-center justify-center shrink-0">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.1"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <path d="M9 15h6" />
-              <path d="M9 11h3" />
-            </svg>
-          </div>
+          <img
+            src="./app-icon.png"
+            alt="LibreDoc Studio"
+            className="w-8 h-8 object-contain shrink-0"
+            draggable={false}
+          />
           <span className="font-display font-semibold text-[15px] tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap">
             LibreDoc Studio
           </span>

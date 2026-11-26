@@ -1,6 +1,22 @@
 import { BrowserWindow } from 'electron';
+import fs from 'fs';
 import path from 'path';
 import type { ThemeMode, UpdaterProgressPayload } from '../shared/types';
+
+function resolveUpdaterIconPath(): string | undefined {
+  const candidates = [
+    typeof process.resourcesPath === 'string'
+      ? path.join(process.resourcesPath, 'icons', 'icon.ico')
+      : '',
+    typeof process.resourcesPath === 'string'
+      ? path.join(process.resourcesPath, 'icons', 'icon.png')
+      : '',
+    path.join(process.cwd(), 'resources', 'icons', 'icon.ico'),
+    path.join(process.cwd(), 'resources', 'icons', 'icon.png'),
+  ].filter(Boolean);
+
+  return candidates.find((p) => fs.existsSync(p));
+}
 
 export class UpdaterWindowController {
   private win: BrowserWindow | null = null;
@@ -30,6 +46,7 @@ export class UpdaterWindowController {
       alwaysOnTop: true,
       skipTaskbar: false,
       title: 'Actualizando LibreDoc Studio',
+      icon: resolveUpdaterIconPath(),
       backgroundColor: bgColor,
       show: false,
       webPreferences: {

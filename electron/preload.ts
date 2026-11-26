@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   CreateDocumentInput,
+  DocumentField,
   DocumentRecord,
   LibreDocAPI,
   OcrProgressEvent,
@@ -59,10 +60,14 @@ const api: LibreDocAPI = {
   deleteDocument: (id: string) => ipcRenderer.invoke('documents:delete', id),
 
   listDocumentFields: (documentId: string) => ipcRenderer.invoke('fields:list', documentId),
+  replaceDocumentFields: (documentId: string, inputs: UpsertFieldInput[]) =>
+    ipcRenderer.invoke('fields:replace-all', documentId, inputs),
   upsertDocumentField: (input: UpsertFieldInput) => ipcRenderer.invoke('fields:upsert', input),
   updateFieldValue: (fieldId: string, value: string) =>
     ipcRenderer.invoke('fields:update-value', fieldId, value),
   deleteDocumentField: (fieldId: string) => ipcRenderer.invoke('fields:delete', fieldId),
+  exportAcroFormPdf: (documentId: string, fields?: DocumentField[]) =>
+    ipcRenderer.invoke('pdf:export-acroform', documentId, fields),
 
   listVersionHistory: () => ipcRenderer.invoke('versions:list'),
   markVersionChangelogSeen: (version: string) => ipcRenderer.invoke('versions:mark-seen', version),

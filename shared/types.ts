@@ -25,6 +25,12 @@ export type DocumentStatus =
 
 export type FieldType = 'text' | 'checkbox' | 'date' | 'multiline';
 
+export type CheckboxStyle = 'check' | 'cross';
+
+export type FieldAlignment = 'left' | 'center' | 'right';
+
+export type FieldSource = 'auto' | 'manual';
+
 export type RecommendedAction =
   | 'unlock_permissions'
   | 'unlock_password'
@@ -140,6 +146,15 @@ export interface AcroFormExtractionResult {
   fields: DocumentField[];
 }
 
+export interface AcroFormExportResult {
+  success: boolean;
+  canceled?: boolean;
+  outputPath?: string;
+  fieldsExported: number;
+  message: string;
+  error?: string;
+}
+
 export interface DocumentAnalysisDetails {
   fileSizeBytes: number;
   pageCount?: number;
@@ -226,6 +241,12 @@ export interface DocumentField {
   font_size: number;
   group_name: string;
   sort_order: number;
+  checkbox_style?: CheckboxStyle;
+  alignment?: FieldAlignment;
+  cover_dashes?: 0 | 1;
+  field_name?: string;
+  tooltip?: string;
+  source?: FieldSource;
 }
 
 export interface SessionState {
@@ -292,6 +313,12 @@ export interface UpsertFieldInput {
   font_size?: number;
   group_name?: string;
   sort_order?: number;
+  checkbox_style?: CheckboxStyle;
+  alignment?: FieldAlignment;
+  cover_dashes?: 0 | 1;
+  field_name?: string;
+  tooltip?: string;
+  source?: FieldSource;
 }
 
 export type SessionStatePatch = Partial<Omit<SessionState, 'pending_restore'>> & {
@@ -344,9 +371,17 @@ export interface LibreDocAPI {
   deleteDocument: (id: string) => Promise<boolean>;
 
   listDocumentFields: (documentId: string) => Promise<DocumentField[]>;
+  replaceDocumentFields: (
+    documentId: string,
+    inputs: UpsertFieldInput[],
+  ) => Promise<DocumentField[]>;
   upsertDocumentField: (input: UpsertFieldInput) => Promise<DocumentField>;
   updateFieldValue: (fieldId: string, value: string) => Promise<DocumentField | null>;
   deleteDocumentField: (fieldId: string) => Promise<boolean>;
+  exportAcroFormPdf: (
+    documentId: string,
+    fields?: DocumentField[],
+  ) => Promise<AcroFormExportResult>;
 
   listVersionHistory: () => Promise<VersionHistoryRecord[]>;
   markVersionChangelogSeen: (version: string) => Promise<void>;

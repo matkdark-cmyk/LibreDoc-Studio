@@ -2,7 +2,7 @@
   "name": "libredoc-studio",
   "productName": "LibreDoc Studio",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Aplicación de escritorio nativa para Windows orientada a analizar, desbloquear, extraer campos con OCR local y editar documentos conservando el diseño original.",
   "type": "module",
   "main": "dist-electron/main.cjs",

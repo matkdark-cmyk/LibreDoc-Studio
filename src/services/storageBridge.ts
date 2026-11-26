@@ -1,6 +1,8 @@
 import JSZip from 'jszip';
 import { PDFCheckBox, PDFDocument, PDFDropdown, PDFRadioGroup, PDFTextField } from 'pdf-lib';
+import { buildAcroFormPdf } from '../../shared/acroFormBuilder';
 import type {
+  AcroFormExportResult,
   AcroFormExtractionResult,
   AppMeta,
   CreateDocumentInput,
@@ -28,7 +30,7 @@ import {
 } from './browserAnalyzer';
 
 const PREVIEW_STORAGE_KEY = 'libredoc_studio_preview_db_v3';
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.2.1';
 
 // Keep uploaded browser-preview file buffers in memory during the web preview session
 const previewFileBuffers = new Map<string, ArrayBuffer>();
@@ -46,7 +48,7 @@ function createInitialPreviewStore(): BrowserPreviewStore {
   const now = new Date().toISOString();
   return {
     app_meta: {
-      schema_version: 4,
+      schema_version: 5,
       last_installed_version: APP_VERSION,
       last_updated_at: now,
       auto_check_updates: 1,
@@ -58,6 +60,7 @@ function createInitialPreviewStore(): BrowserPreviewStore {
       { version: 2, name: '002_session_theme_preference', applied_at: now },
       { version: 3, name: '003_document_analysis_metadata', applied_at: now },
       { version: 4, name: '004_updater_preferences_and_restore_banner', applied_at: now },
+      { version: 5, name: '005_field_acroform_properties', applied_at: now },
     ],
     documents: [],
     document_fields: [],
@@ -77,7 +80,7 @@ function createInitialPreviewStore(): BrowserPreviewStore {
         version: APP_VERSION,
         installed_at: now,
         release_notes:
-          'Estructura base de LibreDoc Studio para Windows, SQLite versionado en userData, diagnóstico universal, motor de desbloqueo PDF/DOCX, OCR offline local y sistema de actualizaciones automáticas.',
+          'Actualización v0.2.1: Nuevo ícono oficial de LibreDoc Studio para Windows y conversor automático de PDF estático a PDF rellenable (AcroForm) de alta precisión con detección híbrida de texto, vectores CTM y capa raster, casillas interactivas arrastrables y exportación estándar.',
         changelog_seen: 0,
       },
     ],
@@ -104,11 +107,18 @@ function readPreviewStore(): BrowserPreviewStore {
         applied_at: new Date().toISOString(),
       });
     }
+    if (!migrations.some((m) => m.version === 5)) {
+      migrations.push({
+        version: 5,
+        name: '005_field_acroform_properties',
+        applied_at: new Date().toISOString(),
+      });
+    }
     return {
       app_meta: {
         ...fallback.app_meta,
         ...(parsed.app_meta ?? {}),
-        schema_version: 4,
+        schema_version: 5,
       },
       schema_migrations: migrations,
       documents: Array.isArray(parsed.documents) ? parsed.documents : [],
@@ -541,6 +551,44 @@ function createBrowserPreviewBridge(): LibreDocAPI {
         );
     },
 
+    async replaceDocumentFields(
+      documentId: string,
+      inputs: UpsertFieldInput[],
+    ): Promise<DocumentField[]> {
+      const store = readPreviewStore();
+      store.document_fields = store.document_fields.filter((f) => f.document_id !== documentId);
+
+      const created: DocumentField[] = inputs.map((input, idx) => ({
+        id: input.id || generateId(),
+        document_id: documentId,
+        page_number: Math.max(1, input.page_number ?? 1),
+        label: input.label.trim() || `Campo ${idx + 1}`,
+        value: input.value ?? '',
+        field_type: input.field_type ?? 'text',
+        x: input.x ?? 56,
+        y: input.y ?? 72 + idx * 36,
+        width: input.width ?? 220,
+        height: input.height ?? 24,
+        font_size: input.font_size ?? 9.5,
+        group_name: input.group_name?.trim() || 'Datos generales',
+        sort_order: input.sort_order ?? idx,
+        checkbox_style: input.checkbox_style ?? 'check',
+        alignment: input.alignment ?? 'left',
+        cover_dashes: input.cover_dashes ?? 0,
+        field_name: input.field_name?.trim() || '',
+        tooltip: input.tooltip?.trim() || input.label.trim() || '',
+        source: input.source ?? 'auto',
+      }));
+
+      store.document_fields.push(...created);
+      const docIndex = store.documents.findIndex((d) => d.id === documentId);
+      if (docIndex >= 0) {
+        store.documents[docIndex].updated_at = new Date().toISOString();
+      }
+      writePreviewStore(store);
+      return created;
+    },
+
     async upsertDocumentField(input: UpsertFieldInput): Promise<DocumentField> {
       const store = readPreviewStore();
       const existingIndex = input.id
@@ -562,9 +610,15 @@ function createBrowserPreviewBridge(): LibreDocAPI {
         y: input.y ?? existing?.y ?? 72 + docFieldCount * 52,
         width: input.width ?? existing?.width ?? 240,
         height: input.height ?? existing?.height ?? 32,
-        font_size: input.font_size ?? existing?.font_size ?? 12,
+        font_size: input.font_size ?? existing?.font_size ?? 9.5,
         group_name: input.group_name?.trim() || existing?.group_name || 'Datos generales',
         sort_order: input.sort_order ?? existing?.sort_order ?? docFieldCount,
+        checkbox_style: input.checkbox_style ?? existing?.checkbox_style ?? 'check',
+        alignment: input.alignment ?? existing?.alignment ?? 'left',
+        cover_dashes: input.cover_dashes ?? existing?.cover_dashes ?? 0,
+        field_name: input.field_name ?? existing?.field_name ?? '',
+        tooltip: input.tooltip ?? existing?.tooltip ?? input.label.trim() ?? '',
+        source: input.source ?? existing?.source ?? 'manual',
       };
 
       if (existingIndex >= 0) {
@@ -609,6 +663,75 @@ function createBrowserPreviewBridge(): LibreDocAPI {
       }
       writePreviewStore(store);
       return true;
+    },
+
+    async exportAcroFormPdf(
+      documentId: string,
+      overrideFields?: DocumentField[],
+    ): Promise<AcroFormExportResult> {
+      const store = readPreviewStore();
+      const doc = store.documents.find((d) => d.id === documentId);
+      const buffer = previewFileBuffers.get(documentId);
+      if (!doc || !buffer) {
+        return {
+          success: false,
+          fieldsExported: 0,
+          message: 'Vuelve a cargar el PDF para exportarlo en la vista web.',
+        };
+      }
+
+      const fieldsToWrite =
+        Array.isArray(overrideFields) && overrideFields.length > 0
+          ? overrideFields
+          : store.document_fields.filter((f) => f.document_id === documentId);
+
+      if (fieldsToWrite.length === 0) {
+        return {
+          success: false,
+          fieldsExported: 0,
+          message: 'No hay campos definidos para exportar.',
+        };
+      }
+
+      try {
+        const { pdfBytes, fieldsWritten } = await buildAcroFormPdf({
+          originalPdfBytes: new Uint8Array(buffer.slice(0)),
+          fields: fieldsToWrite,
+        });
+
+        const baseName = doc.original_name.replace(/\.pdf$/i, '');
+        const fileName = `${baseName}-rellenable.pdf`;
+        const blob = new Blob([new Uint8Array(pdfBytes)], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        const anchor = window.document.createElement('a');
+        anchor.href = url;
+        anchor.download = fileName;
+        window.document.body.appendChild(anchor);
+        anchor.click();
+        window.document.body.removeChild(anchor);
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+        const docIdx = store.documents.findIndex((d) => d.id === documentId);
+        if (docIdx >= 0) {
+          store.documents[docIdx].status = 'exported';
+          store.documents[docIdx].updated_at = new Date().toISOString();
+          writePreviewStore(store);
+        }
+
+        return {
+          success: true,
+          outputPath: fileName,
+          fieldsExported: fieldsWritten,
+          message: `PDF rellenable descargado (${fileName}) con ${fieldsWritten} campo(s) AcroForm.`,
+        };
+      } catch (err) {
+        return {
+          success: false,
+          fieldsExported: 0,
+          message: 'No se pudo generar el PDF rellenable AcroForm.',
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
     },
 
     async listVersionHistory(): Promise<VersionHistoryRecord[]> {

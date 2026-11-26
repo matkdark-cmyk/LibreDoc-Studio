@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertCircle, CheckCircle2, Download, FileText, Loader2, ShieldCheck } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Download, Loader2, ShieldCheck } from 'lucide-react';
 import type { UpdaterProgressPayload } from '../../shared/types';
 import { getLibreDocBridge } from '../services/storageBridge';
 
@@ -99,9 +99,12 @@ export function UpdaterSplash({ previewPayload, onCancelPreview }: UpdaterSplash
         {/* Header */}
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-lg bg-blue-600 text-white flex items-center justify-center shrink-0">
-              <FileText className="w-5 h-5" aria-hidden="true" />
-            </div>
+            <img
+              src="./app-icon.png"
+              alt="LibreDoc Studio"
+              className="w-10 h-10 object-contain shrink-0"
+              draggable={false}
+            />
             <div className="min-w-0">
               <h1 className="text-base font-semibold tracking-tight text-slate-900 dark:text-slate-100 truncate">
                 LibreDoc Studio
