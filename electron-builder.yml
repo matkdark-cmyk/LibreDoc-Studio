@@ -1,0 +1,62 @@
+appId: com.libredoc.studio
+productName: LibreDoc Studio
+copyright: Copyright © 2026 LibreDoc Studio
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+
+asar: true
+asarUnpack:
+  - node_modules/better-sqlite3/**/*
+  - node_modules/tesseract.js/**/*
+  - node_modules/tesseract.js-core/**/*
+
+# Binarios nativos de Windows (qpdf) y modelos OCR offline (spa/eng) fuera de app.asar
+extraResources:
+  - from: resources/bin/win/qpdf
+    to: bin/win/qpdf
+    filter:
+      - "**/*"
+      - "!README.md"
+  - from: resources/tessdata
+    to: tessdata
+    filter:
+      - "*.traineddata"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: LibreDoc-Studio-Setup-${version}.${ext}
+  requestedExecutionLevel: asInvoker
+
+# Instalador nativo NSIS (.exe, NO portable)
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: LibreDoc Studio
+  uninstallDisplayName: LibreDoc Studio
+  # CRÍTICO: Nunca borrar %APPDATA%\LibreDocStudio (base SQLite y workspaces) al actualizar o desinstalar
+  deleteAppDataOnUninstall: false
+  runAfterFinish: true
+
+# ==============================================================================
+# CONFIGURACIÓN DE PUBLICACIÓN Y AUTO-ACTUALIZACIÓN EN GITHUB RELEASES
+# Reemplaza TU_USUARIO_GITHUB y TU_REPOSITORIO_GITHUB con tu cuenta y repositorio.
+# (En GitHub Actions el workflow también inyecta automáticamente el repo activo.)
+# ==============================================================================
+publish:
+  provider: github
+  owner: TU_USUARIO_GITHUB
+  repo: TU_REPOSITORIO_GITHUB
+  releaseType: release

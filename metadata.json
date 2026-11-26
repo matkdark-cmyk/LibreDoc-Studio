@@ -1,0 +1,6 @@
+{
+  "name": "LibreDoc Studio",
+  "description": "Aplicación de escritorio para Windows orientada a analizar, desbloquear, extraer campos con OCR local y editar documentos conservando el diseño original.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

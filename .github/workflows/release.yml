@@ -1,0 +1,113 @@
+name: Build and Release Windows Installer
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: Compilar e instalar NSIS (Windows x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verificar coincidencia entre tag Git y package.json
+        shell: pwsh
+        run: |
+          $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
+          $pkgVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          Write-Host "Tag detectado: v$tagVersion | Versión en package.json: $pkgVersion"
+          if ($tagVersion -ne $pkgVersion) {
+            Write-Error "La versión en package.json ($pkgVersion) no coincide con el tag ($tagVersion). Actualiza package.json antes de crear el tag."
+            exit 1
+          }
+
+      - name: Instalar dependencias
+        shell: pwsh
+        run: |
+          if (Test-Path "package-lock.json") {
+            npm ci
+          } else {
+            npm install
+          }
+
+      - name: Recompilar módulo nativo better-sqlite3 para Electron (Windows x64)
+        shell: pwsh
+        run: npm run rebuild:native
+
+      - name: Descargar binarios offline para Windows (qpdf + tessdata spa/eng)
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run setup:assets
+
+      - name: Verificar presencia de qpdf y modelos OCR antes de empaquetar
+        shell: pwsh
+        run: |
+          $requiredFiles = @(
+            "resources/bin/win/qpdf/qpdf.exe",
+            "resources/tessdata/spa.traineddata",
+            "resources/tessdata/eng.traineddata"
+          )
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) {
+              Write-Error "Falta recurso obligatorio para empaquetado offline: $file"
+              exit 1
+            }
+            $sizeMB = [Math]::Round((Get-Item $file).Length / 1MB, 2)
+            Write-Host "OK: $file ($sizeMB MB)"
+          }
+
+      - name: Validar TypeScript (frontend y Electron)
+        shell: pwsh
+        run: npm run lint
+
+      - name: Compilar Vite y bundles Electron
+        shell: pwsh
+        run: npm run build
+
+      - name: Empaquetar instalador NSIS (.exe) y publicar en GitHub Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx electron-builder --win nsis --x64 --publish always `
+            -c.publish.owner="${{ github.repository_owner }}" `
+            -c.publish.repo="${{ github.event.repository.name }}"
+
+      - name: Verificar artefactos generados (.exe, .blockmap, latest.yml)
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path release | Format-Table Name, Length
+          if (-not (Test-Path "release/latest.yml")) {
+            Write-Error "No se generó release/latest.yml requerido por electron-updater."
+            exit 1
+          }
+          $exeFiles = Get-ChildItem -Path release -Filter "LibreDoc-Studio-Setup-*.exe"
+          $blockmaps = Get-ChildItem -Path release -Filter "*.blockmap"
+          if ($exeFiles.Count -eq 0 -or $blockmaps.Count -eq 0) {
+            Write-Error "Faltan artefactos NSIS (.exe o .blockmap) en release/."
+            exit 1
+          }
+          Write-Host "Release verificada correctamente: $($exeFiles[0].Name), $($blockmaps[0].Name) y latest.yml"
+
+      - name: Guardar respaldo de artefactos en el workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibreDoc-Studio-Windows-Installer-${{ github.ref_name }}
+          path: |
+            release/LibreDoc-Studio-Setup-*.exe
+            release/LibreDoc-Studio-Setup-*.exe.blockmap
+            release/latest.yml
+          retention-days: 30

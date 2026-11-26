@@ -1,0 +1,16 @@
+node_modules/
+build/
+dist/
+dist-electron/
+release/
+coverage/
+.DS_Store
+*.log
+*.db
+*.db-wal
+*.db-shm
+.env*
+!.env.example
+resources/bin/win/qpdf/*.exe
+resources/bin/win/qpdf/*.dll
+resources/tessdata/*.traineddata
