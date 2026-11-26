@@ -1,4 +1,4 @@
-export type AppRoute = 'workspace' | 'editor' | 'updates';
+export type AppRoute = 'workspace' | 'preview' | 'editor' | 'updates';
 
 export type ThemeMode = 'light' | 'dark';
 
@@ -151,6 +151,45 @@ export interface AcroFormExportResult {
   canceled?: boolean;
   outputPath?: string;
   fieldsExported: number;
+  message: string;
+  error?: string;
+}
+
+export interface SystemPrinterInfo {
+  name: string;
+  displayName: string;
+  description: string;
+  status: number;
+  isDefault: boolean;
+}
+
+export type PrintPaperSize = 'Letter' | 'A4' | 'Legal';
+
+export type PrintDuplexMode = 'simplex' | 'longEdge' | 'shortEdge';
+
+export interface PrintDocumentOptions {
+  printerName?: string;
+  copies: number;
+  color: boolean;
+  landscape: boolean;
+  duplexMode: PrintDuplexMode;
+  pageSize: PrintPaperSize;
+  collate: boolean;
+  pageRangeMode: 'all' | 'current' | 'custom';
+  customPageRange?: string;
+  useSystemDialog?: boolean;
+}
+
+export interface PrintRenderedPage {
+  pageNumber: number;
+  dataUrl: string;
+  widthPt: number;
+  heightPt: number;
+}
+
+export interface PrintResult {
+  success: boolean;
+  canceled?: boolean;
   message: string;
   error?: string;
 }
@@ -382,6 +421,13 @@ export interface LibreDocAPI {
     documentId: string,
     fields?: DocumentField[],
   ) => Promise<AcroFormExportResult>;
+
+  listPrinters: () => Promise<SystemPrinterInfo[]>;
+  printRenderedDocument: (
+    pages: PrintRenderedPage[],
+    options: PrintDocumentOptions,
+    documentTitle: string,
+  ) => Promise<PrintResult>;
 
   listVersionHistory: () => Promise<VersionHistoryRecord[]>;
   markVersionChangelogSeen: (version: string) => Promise<void>;

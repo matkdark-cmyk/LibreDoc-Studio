@@ -7,6 +7,8 @@ import type {
   DocumentField,
   DocumentRecord,
   OcrProgressEvent,
+  PrintDocumentOptions,
+  PrintRenderedPage,
   RenderedPagePayload,
   SessionState,
   SessionStatePatch,
@@ -22,6 +24,7 @@ import type { CardFeedback } from './components/DiagnosisCard';
 import { Sidebar } from './components/Sidebar';
 import { UpdateAvailableDialog } from './components/UpdateAvailableDialog';
 import { EditorPage } from './pages/EditorPage';
+import { PreviewPage } from './pages/PreviewPage';
 import { UpdaterSplash } from './pages/UpdaterSplash';
 import { UpdatesPage } from './pages/UpdatesPage';
 import { WorkspacePage } from './pages/WorkspacePage';
@@ -46,6 +49,7 @@ const DEFAULT_SESSION: SessionState = {
 
 const ROUTE_TITLES: Record<AppRoute, string> = {
   workspace: 'Inicio / Documentos',
+  preview: 'Vista previa',
   editor: 'Editor',
   updates: 'Actualizaciones',
 };
@@ -252,8 +256,11 @@ function MainApp() {
   const handleNavigate = useCallback(
     (route: AppRoute) => {
       patchSession({ active_route: route });
+      if (route === 'editor' && sessionRef.current.active_document_id) {
+        void loadFieldsForDocument(sessionRef.current.active_document_id);
+      }
     },
-    [patchSession],
+    [loadFieldsForDocument, patchSession],
   );
 
   const handleToggleTheme = useCallback(
@@ -340,6 +347,18 @@ function MainApp() {
       await runStaticPdfAutoDetection(documentId, true);
     },
     [loadFieldsForDocument, patchSession, runStaticPdfAutoDetection],
+  );
+
+  const handlePreviewDocument = useCallback(
+    (documentId: string) => {
+      patchSession({
+        active_document_id: documentId,
+        active_route: 'preview',
+        active_page: 1,
+        scroll_position: 0,
+      });
+    },
+    [patchSession],
   );
 
   const handleDetectPdfFields = useCallback(
@@ -486,6 +505,68 @@ function MainApp() {
       }
     },
     [bridge, electronMode, handleOpenDocument],
+  );
+
+  const handlePickNativeFileForPreview = useCallback(async () => {
+    setIngestError(null);
+    setIngesting(true);
+    try {
+      const created = await bridge.pickAndRegisterDocument();
+      if (!created) return;
+      const [updatedList, diag] = await Promise.all([
+        bridge.listDocuments(),
+        bridge.getDiagnostics(),
+      ]);
+      setDocuments(updatedList);
+      setDiagnostics(diag);
+      handlePreviewDocument(created.id);
+    } catch (err) {
+      setIngestError(
+        err instanceof Error ? err.message : 'No se pudo cargar el archivo para vista previa.',
+      );
+    } finally {
+      setIngesting(false);
+    }
+  }, [bridge, handlePreviewDocument]);
+
+  const handleIngestFilesForPreview = useCallback(
+    async (files: FileList) => {
+      setIngestError(null);
+      setIngesting(true);
+      try {
+        let lastCreated: DocumentRecord | null = null;
+        for (const file of Array.from(files)) {
+          if (electronMode) {
+            const filePath =
+              bridge.getPathForFile?.(file) ||
+              (file as File & { path?: string }).path ||
+              '';
+            if (!filePath) {
+              throw new Error('No se pudo obtener la ruta local del archivo.');
+            }
+            lastCreated = await bridge.ingestFilePath(filePath);
+          } else {
+            lastCreated = await ingestBrowserPreviewFile(file);
+          }
+        }
+        const [updatedList, diag] = await Promise.all([
+          bridge.listDocuments(),
+          bridge.getDiagnostics(),
+        ]);
+        setDocuments(updatedList);
+        setDiagnostics(diag);
+        if (lastCreated) {
+          handlePreviewDocument(lastCreated.id);
+        }
+      } catch (err) {
+        setIngestError(
+          err instanceof Error ? err.message : 'Ocurrió un error al cargar el archivo.',
+        );
+      } finally {
+        setIngesting(false);
+      }
+    },
+    [bridge, electronMode, handlePreviewDocument],
   );
 
   const handleSelectDiagnosisDoc = useCallback((documentId: string | null) => {
@@ -736,6 +817,14 @@ function MainApp() {
     [bridge],
   );
 
+  const handleListPrinters = useCallback(() => bridge.listPrinters(), [bridge]);
+
+  const handlePrintRenderedDocument = useCallback(
+    (pages: PrintRenderedPage[], options: PrintDocumentOptions, documentTitle: string) =>
+      bridge.printRenderedDocument(pages, options, documentTitle),
+    [bridge],
+  );
+
   const handleMarkChangelogSeen = useCallback(
     async (version: string) => {
       await bridge.markVersionChangelogSeen(version);
@@ -848,16 +937,17 @@ function MainApp() {
             <span className="font-medium text-slate-900 dark:text-slate-100 whitespace-nowrap">
               {ROUTE_TITLES[session.active_route]}
             </span>
-            {session.active_route === 'editor' && activeDocument && (
-              <>
-                <span className="text-slate-400" aria-hidden="true">
-                  /
-                </span>
-                <span className="text-slate-600 dark:text-slate-300 truncate">
-                  {activeDocument.original_name}
-                </span>
-              </>
-            )}
+            {(session.active_route === 'editor' || session.active_route === 'preview') &&
+              activeDocument && (
+                <>
+                  <span className="text-slate-400" aria-hidden="true">
+                    /
+                  </span>
+                  <span className="text-slate-600 dark:text-slate-300 truncate">
+                    {activeDocument.original_name}
+                  </span>
+                </>
+              )}
           </div>
 
           <div className="flex items-center gap-4 text-xs text-slate-500 dark:text-slate-400 shrink-0">
@@ -939,10 +1029,31 @@ function MainApp() {
               onExtractAcroForm={handleExtractAcroForm}
               onReanalyzeDocument={handleReanalyzeDocument}
               onRevealDocumentInFolder={handleRevealDocumentInFolder}
+              onPreviewDocument={handlePreviewDocument}
               onOpenDocument={(id) => void handleOpenDocument(id)}
               onDeleteDocument={handleDeleteDocument}
               onOpenUserDataFolder={handleOpenUserDataFolder}
               onClearIngestError={() => setIngestError(null)}
+            />
+          )}
+
+          {session.active_route === 'preview' && (
+            <PreviewPage
+              document={activeDocument}
+              recentDocuments={documents}
+              session={session}
+              isElectron={electronMode}
+              ingesting={ingesting}
+              onSelectDocumentForPreview={handlePreviewDocument}
+              onPickFileForPreview={handlePickNativeFileForPreview}
+              onIngestFilesForPreview={handleIngestFilesForPreview}
+              onOpenInEditor={(id) => void handleOpenDocument(id)}
+              onGoToWorkspace={() => handleNavigate('workspace')}
+              onPatchSession={patchSession}
+              onListPrinters={handleListPrinters}
+              onPrintRenderedDocument={handlePrintRenderedDocument}
+              onReadPlainText={handleReadPlainText}
+              onReadWorkingFileBytes={handleReadWorkingFileBytes}
             />
           )}
 
@@ -952,6 +1063,7 @@ function MainApp() {
               recentDocuments={documents}
               fields={fields}
               session={session}
+              isElectron={electronMode}
               detectingFields={detectingFields}
               detectProgress={detectProgress}
               exportingPdf={exportingPdf}
@@ -965,6 +1077,8 @@ function MainApp() {
               onDeleteField={handleDeleteField}
               onDetectPdfFields={handleDetectPdfFields}
               onExportAcroForm={handleExportAcroForm}
+              onListPrinters={handleListPrinters}
+              onPrintRenderedDocument={handlePrintRenderedDocument}
               onReadPlainText={handleReadPlainText}
               onReadWorkingFileBytes={handleReadWorkingFileBytes}
             />

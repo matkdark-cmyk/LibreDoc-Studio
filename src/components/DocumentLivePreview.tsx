@@ -77,6 +77,17 @@ const DEFAULT_PAGE_METRICS: PdfPageMetrics = {
   heightPt: 792,
 };
 
+const PDF_CSS_SCALE = 96 / 72;
+const MAX_CANVAS_PIXELS = 16_000_000;
+
+function computeCrispOutputScale(cssWidth: number, cssHeight: number): number {
+  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+  const target = Math.min(3.5, Math.max(2, dpr * 2));
+  const area = Math.max(1, cssWidth * cssHeight);
+  const maxSafe = Math.sqrt(MAX_CANVAS_PIXELS / area);
+  return Math.max(1, Math.min(target, maxSafe));
+}
+
 function extractParagraphsFromDocxXml(xml: string): string[] {
   const paragraphs: string[] = [];
   const pMatches = xml.match(/<w:p\b[\s\S]*?<\/w:p>/g) ?? [];
@@ -148,6 +159,7 @@ export function DocumentLivePreview({
   const isImage = fileType === 'png' || fileType === 'jpg' || fileType === 'jpeg';
   const isDocx = fileType === 'docx';
   const isPlainText = document.diagnosis_type === 'PLAIN_TEXT';
+  const effectiveScale = zoomLevel * PDF_CSS_SCALE;
 
   const bytesCacheRef = useRef<{ key: string; bytes: Uint8Array | null }>({
     key: '',
@@ -191,8 +203,8 @@ export function DocumentLivePreview({
     const handleMouseMove = (e: globalThis.MouseEvent) => {
       const activeDrag = dragRef.current;
       if (activeDrag) {
-        const dxPt = (e.clientX - activeDrag.startClientX) / Math.max(0.1, zoomLevel);
-        const dyPt = (e.clientY - activeDrag.startClientY) / Math.max(0.1, zoomLevel);
+        const dxPt = (e.clientX - activeDrag.startClientX) / Math.max(0.1, effectiveScale);
+        const dyPt = (e.clientY - activeDrag.startClientY) / Math.max(0.1, effectiveScale);
         const moved = activeDrag.moved || Math.abs(dxPt) > 1.5 || Math.abs(dyPt) > 1.5;
 
         if (activeDrag.mode === 'move') {
@@ -234,11 +246,11 @@ export function DocumentLivePreview({
         const bounds = pageFrameRef.current.getBoundingClientRect();
         const ptX = Math.max(
           0,
-          Math.min(pageMetrics.widthPt, (e.clientX - bounds.left) / Math.max(0.1, zoomLevel)),
+          Math.min(pageMetrics.widthPt, (e.clientX - bounds.left) / Math.max(0.1, effectiveScale)),
         );
         const ptY = Math.max(
           0,
-          Math.min(pageMetrics.heightPt, (e.clientY - bounds.top) / Math.max(0.1, zoomLevel)),
+          Math.min(pageMetrics.heightPt, (e.clientY - bounds.top) / Math.max(0.1, effectiveScale)),
         );
         setDrawDraft({
           ...activeDraw,
@@ -313,13 +325,14 @@ export function DocumentLivePreview({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [zoomLevel, pageMetrics, drawTool, onMoveOrResizeField, onCreateDrawnField]);
+  }, [effectiveScale, pageMetrics, drawTool, onMoveOrResizeField, onCreateDrawnField]);
 
-  // Render PDF page onto <canvas> via pdfjs-dist using Vite `?url` worker
+  // Render PDF page onto <canvas> via pdfjs-dist using HiDPI transform supersampling
   useEffect(() => {
     if (!isPdf) return;
     let cancelled = false;
     let loadingTask: { destroy: () => Promise<void> } | null = null;
+    let renderTask: { cancel: () => void; promise: Promise<void> } | null = null;
 
     async function renderPdfPage() {
       setLoading(true);
@@ -371,36 +384,47 @@ export function DocumentLivePreview({
           heightPt: baseViewport.height,
         });
 
-        const dpr = Math.min(2.5, Math.max(1, window.devicePixelRatio || 1));
-        const renderViewport = page.getViewport({ scale: zoomLevel * dpr });
+        const cssViewport = page.getViewport({ scale: effectiveScale });
+        const cssWidth = Math.max(1, Math.floor(cssViewport.width));
+        const cssHeight = Math.max(1, Math.floor(cssViewport.height));
+        const outputScale = computeCrispOutputScale(cssWidth, cssHeight);
 
         const canvas = canvasRef.current;
         if (!canvas || cancelled) return;
 
-        canvas.width = Math.max(1, Math.round(renderViewport.width));
-        canvas.height = Math.max(1, Math.round(renderViewport.height));
+        canvas.width = Math.max(1, Math.floor(cssWidth * outputScale));
+        canvas.height = Math.max(1, Math.floor(cssHeight * outputScale));
 
-        const ctx = canvas.getContext('2d');
+        const ctx = canvas.getContext('2d', { alpha: false });
         if (!ctx) {
           setLoadError('No se pudo inicializar el lienzo 2D para mostrar el PDF.');
           setLoading(false);
           return;
         }
 
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        await page.render({
+        const transform =
+          outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined;
+
+        const rTask = page.render({
           canvas,
           canvasContext: ctx,
-          viewport: renderViewport,
-        }).promise;
+          viewport: cssViewport,
+          transform,
+          intent: 'display',
+        });
+        renderTask = rTask;
+        await rTask.promise;
 
         if (!cancelled) {
           setLoading(false);
         }
       } catch (err) {
-        if (!cancelled) {
+        if (!cancelled && (err as { name?: string })?.name !== 'RenderingCancelledException') {
           const message = err instanceof Error ? err.message : String(err);
           setLoadError(
             document.diagnosis_type === 'PDF_ENCRYPTED_OPEN'
@@ -420,6 +444,13 @@ export function DocumentLivePreview({
 
     return () => {
       cancelled = true;
+      if (renderTask) {
+        try {
+          renderTask.cancel();
+        } catch {
+          // Ignore cancel race
+        }
+      }
     };
   }, [
     isPdf,
@@ -427,7 +458,7 @@ export function DocumentLivePreview({
     document.id,
     document.diagnosis_type,
     activePage,
-    zoomLevel,
+    effectiveScale,
     onReadWorkingFileBytes,
     onTotalPagesDetected,
   ]);
@@ -557,8 +588,8 @@ export function DocumentLivePreview({
     [fieldsOnPage, activeFieldId],
   );
 
-  const displayWidthPx = Math.round(pageMetrics.widthPt * zoomLevel);
-  const displayHeightPx = Math.round(pageMetrics.heightPt * zoomLevel);
+  const displayWidthPx = Math.floor(pageMetrics.widthPt * effectiveScale);
+  const displayHeightPx = Math.floor(pageMetrics.heightPt * effectiveScale);
 
   const handleStartDraw = (e: ReactMouseEvent<HTMLDivElement>) => {
     if (drawTool === 'none' || e.button !== 0 || !pageFrameRef.current) return;
@@ -566,11 +597,11 @@ export function DocumentLivePreview({
     const bounds = pageFrameRef.current.getBoundingClientRect();
     const ptX = Math.max(
       0,
-      Math.min(pageMetrics.widthPt, (e.clientX - bounds.left) / Math.max(0.1, zoomLevel)),
+      Math.min(pageMetrics.widthPt, (e.clientX - bounds.left) / Math.max(0.1, effectiveScale)),
     );
     const ptY = Math.max(
       0,
-      Math.min(pageMetrics.heightPt, (e.clientY - bounds.top) / Math.max(0.1, zoomLevel)),
+      Math.min(pageMetrics.heightPt, (e.clientY - bounds.top) / Math.max(0.1, effectiveScale)),
     );
     setDrawDraft({ startX: ptX, startY: ptY, curX: ptX, curY: ptY });
   };
@@ -756,14 +787,14 @@ export function DocumentLivePreview({
               const coverDashes = field.cover_dashes === 1;
               const alignment = field.alignment ?? 'left';
 
-              const leftPx = fx * zoomLevel;
-              const topPx = fy * zoomLevel;
-              const widthPx = Math.max(10, fw * zoomLevel);
-              const heightPx = Math.max(10, fh * zoomLevel);
+              const leftPx = fx * effectiveScale;
+              const topPx = fy * effectiveScale;
+              const widthPx = Math.max(10, fw * effectiveScale);
+              const heightPx = Math.max(10, fh * effectiveScale);
 
               const scaledFontSize = Math.max(
                 8,
-                Math.min(18, Number(((field.font_size || 9.5) * zoomLevel).toFixed(1))),
+                Math.min(22, Number(((field.font_size || 9.5) * effectiveScale).toFixed(1))),
               );
 
               let boxStyleClasses = 'border-transparent bg-transparent';
@@ -933,10 +964,10 @@ export function DocumentLivePreview({
         {drawDraft && drawTool !== 'none' && (
           <div
             style={{
-              left: `${Math.min(drawDraft.startX, drawDraft.curX) * zoomLevel}px`,
-              top: `${Math.min(drawDraft.startY, drawDraft.curY) * zoomLevel}px`,
-              width: `${Math.max(4, Math.abs(drawDraft.curX - drawDraft.startX) * zoomLevel)}px`,
-              height: `${Math.max(4, Math.abs(drawDraft.curY - drawDraft.startY) * zoomLevel)}px`,
+              left: `${Math.min(drawDraft.startX, drawDraft.curX) * effectiveScale}px`,
+              top: `${Math.min(drawDraft.startY, drawDraft.curY) * effectiveScale}px`,
+              width: `${Math.max(4, Math.abs(drawDraft.curX - drawDraft.startX) * effectiveScale)}px`,
+              height: `${Math.max(4, Math.abs(drawDraft.curY - drawDraft.startY) * effectiveScale)}px`,
             }}
             className={`absolute z-30 pointer-events-none border-2 border-dashed rounded-[2px] ${
               drawTool === 'text'

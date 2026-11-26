@@ -9,6 +9,7 @@ import {
 import {
   AlertTriangle,
   ArrowRight,
+  Eye,
   FilePlus2,
   FolderOpen,
   Loader2,
@@ -50,6 +51,7 @@ interface WorkspacePageProps {
   onExtractAcroForm: (documentId: string) => Promise<void>;
   onReanalyzeDocument: (documentId: string) => Promise<void>;
   onRevealDocumentInFolder: (documentId: string) => Promise<void>;
+  onPreviewDocument: (documentId: string) => void;
   onOpenDocument: (documentId: string) => void;
   onDeleteDocument: (documentId: string) => Promise<void>;
   onOpenUserDataFolder: () => Promise<void>;
@@ -116,6 +118,7 @@ export function WorkspacePage({
   onExtractAcroForm,
   onReanalyzeDocument,
   onRevealDocumentInFolder,
+  onPreviewDocument,
   onOpenDocument,
   onDeleteDocument,
   onOpenUserDataFolder,
@@ -589,6 +592,16 @@ export function WorkspacePage({
                             className="px-2.5 py-1.5 rounded-md text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
                           >
                             Diagnóstico
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => onPreviewDocument(doc.id)}
+                            title="Abrir vista previa sin editar"
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+                          >
+                            <Eye className="w-3.5 h-3.5" aria-hidden="true" />
+                            <span>Ver</span>
                           </button>
 
                           <button

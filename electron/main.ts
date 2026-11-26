@@ -10,8 +10,12 @@ import type {
   DocumentStatus,
   OcrRunResult,
   PlainTextContentResult,
+  PrintDocumentOptions,
+  PrintRenderedPage,
+  PrintResult,
   RenderedPagePayload,
   SessionStatePatch,
+  SystemPrinterInfo,
   UnlockResult,
   UpsertFieldInput,
 } from '../shared/types';
@@ -584,6 +588,256 @@ function registerIpcHandlers(): void {
           message: 'Error al generar el PDF rellenable AcroForm.',
           error: err instanceof Error ? err.message : String(err),
         };
+      }
+    },
+  );
+
+  ipcMain.handle('printers:list', async (event): Promise<SystemPrinterInfo[]> => {
+    try {
+      const targetContents = mainWindow?.webContents ?? event.sender;
+      const rawPrinters = (await targetContents.getPrintersAsync()) as Array<
+        Electron.PrinterInfo & { status?: number; isDefault?: boolean }
+      >;
+      return rawPrinters
+        .map((p) => {
+          const opts = (p.options ?? {}) as Record<string, unknown>;
+          const isDefault = Boolean(
+            p.isDefault ??
+              opts.isDefault ??
+              opts['printer-is-default'] === 'true',
+          );
+          const status = typeof p.status === 'number' ? p.status : 0;
+          return {
+            name: p.name,
+            displayName: p.displayName || p.name,
+            description: p.description || '',
+            status,
+            isDefault,
+          };
+        })
+        .sort(
+          (a, b) =>
+            Number(b.isDefault) - Number(a.isDefault) ||
+            a.displayName.localeCompare(b.displayName),
+        );
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle(
+    'document:print',
+    async (
+      _event,
+      pages: PrintRenderedPage[],
+      options: PrintDocumentOptions,
+      documentTitle: string,
+    ): Promise<PrintResult> => {
+      if (!Array.isArray(pages) || pages.length === 0) {
+        return {
+          success: false,
+          message: 'No hay páginas preparadas para imprimir.',
+        };
+      }
+
+      const safePages = pages.filter(
+        (p) =>
+          typeof p.dataUrl === 'string' &&
+          (p.dataUrl.startsWith('data:image/jpeg;base64,') ||
+            p.dataUrl.startsWith('data:image/png;base64,')),
+      );
+
+      if (safePages.length === 0) {
+        return {
+          success: false,
+          message: 'Las páginas generadas para impresión no son válidas.',
+        };
+      }
+
+      const validPageSizes = new Set(['Letter', 'A4', 'Legal']);
+      const pageSize: 'Letter' | 'A4' | 'Legal' = validPageSizes.has(options.pageSize)
+        ? options.pageSize
+        : 'Letter';
+
+      const validDuplex = new Set(['simplex', 'longEdge', 'shortEdge']);
+      const duplexMode: 'simplex' | 'longEdge' | 'shortEdge' = validDuplex.has(options.duplexMode)
+        ? options.duplexMode
+        : 'simplex';
+
+      const copies = Math.max(1, Math.min(99, Math.round(Number(options.copies) || 1)));
+      const landscape = Boolean(options.landscape);
+      const color = options.color !== false;
+      const collate = Boolean(options.collate);
+      const useSystemDialog = Boolean(options.useSystemDialog);
+      const safeTitle = String(documentTitle || 'LibreDoc Studio')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+      const cssPageSize =
+        pageSize === 'A4' ? 'A4' : pageSize === 'Legal' ? 'legal' : 'letter';
+      const cssOrientation = landscape ? 'landscape' : 'portrait';
+
+      const pagesHtml = safePages
+        .map(
+          (p, idx) =>
+            `<div class="print-page${idx === safePages.length - 1 ? ' last-page' : ''}"><img src="${p.dataUrl}" alt="Página ${p.pageNumber}" /></div>`,
+        )
+        .join('\n');
+
+      const printHtml = `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>${safeTitle}</title>
+  <style>
+    @page {
+      size: ${cssPageSize} ${cssOrientation};
+      margin: 0;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #ffffff;
+      width: 100%;
+    }
+    .print-page {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      page-break-after: always;
+      break-after: page;
+      background: #ffffff;
+    }
+    .print-page.last-page {
+      page-break-after: auto;
+      break-after: auto;
+    }
+    .print-page img {
+      max-width: 100%;
+      max-height: 100%;
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      display: block;
+      ${color ? '' : 'filter: grayscale(100%);'}
+    }
+  </style>
+</head>
+<body>
+${pagesHtml}
+</body>
+</html>`;
+
+      const tempHtmlPath = path.join(
+        app.getPath('temp'),
+        `libredoc-print-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.html`,
+      );
+
+      let printWin: BrowserWindow | null = null;
+
+      try {
+        fs.writeFileSync(tempHtmlPath, printHtml, 'utf8');
+
+        printWin = new BrowserWindow({
+          show: false,
+          width: 1024,
+          height: 1280,
+          backgroundColor: '#ffffff',
+          webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+          },
+        });
+
+        await printWin.loadFile(tempHtmlPath);
+
+        // Ensure every high-DPI page image has fully decoded before sending to printer spooler
+        await printWin.webContents.executeJavaScript(`
+          Promise.all(
+            Array.from(document.images).map((img) =>
+              img.complete && img.naturalWidth > 0
+                ? Promise.resolve()
+                : new Promise((resolve) => {
+                    img.addEventListener('load', resolve, { once: true });
+                    img.addEventListener('error', resolve, { once: true });
+                  })
+            )
+          ).then(() => new Promise((r) => setTimeout(r, 80)));
+        `);
+
+        const printResult = await new Promise<PrintResult>((resolve) => {
+          if (!printWin || printWin.isDestroyed()) {
+            resolve({
+              success: false,
+              message: 'La ventana de impresión se cerró inesperadamente.',
+            });
+            return;
+          }
+
+          const printConfig: Electron.WebContentsPrintOptions = {
+            silent: !useSystemDialog,
+            printBackground: true,
+            color,
+            copies,
+            collate,
+            landscape,
+            duplexMode,
+            pageSize,
+            margins: { marginType: 'none' },
+          };
+
+          if (!useSystemDialog && options.printerName) {
+            printConfig.deviceName = options.printerName;
+          }
+
+          printWin.webContents.print(printConfig, (success, failureReason) => {
+            if (success) {
+              const targetLabel = useSystemDialog
+                ? 'la impresora seleccionada'
+                : options.printerName || 'la impresora predeterminada';
+              resolve({
+                success: true,
+                message: `Documento enviado correctamente a ${targetLabel} (${safePages.length} pág., ${copies} copia${copies > 1 ? 's' : ''}).`,
+              });
+            } else {
+              const isCanceled =
+                typeof failureReason === 'string' &&
+                failureReason.toLowerCase().includes('cancel');
+              resolve({
+                success: false,
+                canceled: isCanceled,
+                message: isCanceled
+                  ? 'Impresión cancelada por el usuario.'
+                  : 'No se pudo completar la impresión en el equipo.',
+                error: isCanceled ? undefined : failureReason || 'Error desconocido de impresora.',
+              });
+            }
+          });
+        });
+
+        return printResult;
+      } catch (err) {
+        return {
+          success: false,
+          message: 'Error inesperado al preparar la impresión.',
+          error: err instanceof Error ? err.message : String(err),
+        };
+      } finally {
+        if (printWin && !printWin.isDestroyed()) {
+          printWin.destroy();
+        }
+        try {
+          if (fs.existsSync(tempHtmlPath)) {
+            fs.unlinkSync(tempHtmlPath);
+          }
+        } catch {
+          // Non-fatal temp cleanup error
+        }
       }
     },
   );

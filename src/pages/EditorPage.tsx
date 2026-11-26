@@ -8,13 +8,14 @@ import {
   ChevronLeft,
   ChevronRight,
   Crosshair,
-  Download,
   Eye,
   EyeOff,
   FileText,
   Loader2,
   MousePointer2,
   Plus,
+  Printer,
+  Save,
   Search,
   Sparkles,
   Square,
@@ -32,9 +33,13 @@ import type {
   FieldAlignment,
   FieldType,
   PlainTextContentResult,
+  PrintDocumentOptions,
+  PrintRenderedPage,
+  PrintResult,
   SessionState,
   SessionStatePatch,
   SidebarTab,
+  SystemPrinterInfo,
   UpsertFieldInput,
 } from '../../shared/types';
 import {
@@ -42,12 +47,17 @@ import {
   type DrawnFieldRect,
   type PreviewDrawTool,
 } from '../components/DocumentLivePreview';
+import {
+  SaveOrPrintModal,
+  type SaveOrPrintInitialTab,
+} from '../components/SaveOrPrintModal';
 
 interface EditorPageProps {
   document: DocumentRecord | null;
   recentDocuments: DocumentRecord[];
   fields: DocumentField[];
   session: SessionState;
+  isElectron: boolean;
   detectingFields: boolean;
   detectProgress: { currentPage: number; totalPages: number } | null;
   exportingPdf: boolean;
@@ -61,6 +71,12 @@ interface EditorPageProps {
   onDeleteField: (fieldId: string) => Promise<void>;
   onDetectPdfFields: (documentId: string) => Promise<void>;
   onExportAcroForm: (documentId: string, currentFields?: DocumentField[]) => Promise<AcroFormExportResult>;
+  onListPrinters: () => Promise<SystemPrinterInfo[]>;
+  onPrintRenderedDocument: (
+    pages: PrintRenderedPage[],
+    options: PrintDocumentOptions,
+    documentTitle: string,
+  ) => Promise<PrintResult>;
   onReadPlainText: (documentId: string) => Promise<PlainTextContentResult | null>;
   onReadWorkingFileBytes: (documentId: string) => Promise<Uint8Array | null>;
 }
@@ -72,6 +88,7 @@ export function EditorPage({
   recentDocuments,
   fields,
   session,
+  isElectron,
   detectingFields,
   detectProgress,
   exportingPdf,
@@ -85,6 +102,8 @@ export function EditorPage({
   onDeleteField,
   onDetectPdfFields,
   onExportAcroForm,
+  onListPrinters,
+  onPrintRenderedDocument,
   onReadPlainText,
   onReadWorkingFileBytes,
 }: EditorPageProps) {
@@ -101,6 +120,7 @@ export function EditorPage({
   const [hoveredFieldId, setHoveredFieldId] = useState<string | null>(null);
   const [showFieldHighlights, setShowFieldHighlights] = useState(true);
   const [drawTool, setDrawTool] = useState<PreviewDrawTool>('none');
+  const [saveOrPrintTab, setSaveOrPrintTab] = useState<SaveOrPrintInitialTab | null>(null);
 
   const timersRef = useRef<Map<string, number>>(new Map());
   const scrollTimerRef = useRef<number | null>(null);
@@ -404,9 +424,7 @@ export function EditorPage({
     [onDeleteField],
   );
 
-  const handleExportWithDrafts = async () => {
-    if (!document) return;
-    // Flush any pending debounced text edits and merge draftValues so exported PDF has exact latest values
+  const flushPendingDrafts = useCallback(async (): Promise<DocumentField[]> => {
     for (const [fId, timer] of timersRef.current.entries()) {
       window.clearTimeout(timer);
       timersRef.current.delete(fId);
@@ -415,11 +433,37 @@ export function EditorPage({
         await onUpdateFieldValue(fId, val);
       }
     }
-    const mergedFields: DocumentField[] = fields.map((f) => ({
+    return fields.map((f) => ({
       ...f,
       value: draftValues[f.id] ?? f.value,
     }));
-    await onExportAcroForm(document.id, mergedFields);
+  }, [draftValues, fields, onUpdateFieldValue]);
+
+  const mergedFieldsForOutput = useMemo<DocumentField[]>(
+    () =>
+      fields.map((f) => ({
+        ...f,
+        value: draftValues[f.id] ?? f.value,
+      })),
+    [fields, draftValues],
+  );
+
+  const handleOpenSaveOrPrint = async (tab: SaveOrPrintInitialTab) => {
+    if (!document) return;
+    await flushPendingDrafts();
+    setSaveOrPrintTab(tab);
+  };
+
+  const handleExportWithDrafts = async (): Promise<AcroFormExportResult> => {
+    if (!document) {
+      return {
+        success: false,
+        fieldsExported: 0,
+        message: 'No hay ningún documento activo.',
+      };
+    }
+    const mergedFields = await flushPendingDrafts();
+    return onExportAcroForm(document.id, mergedFields);
   };
 
   const handleCanvasScroll = () => {
@@ -558,24 +602,39 @@ export function EditorPage({
                 )}
               </button>
 
-              <button
-                type="button"
-                disabled={exportingPdf || detectingFields || fields.length === 0}
-                onClick={() => void handleExportWithDrafts()}
-                className="w-full inline-flex items-center justify-center gap-2 h-8 px-3 rounded-lg text-xs font-medium bg-blue-700 hover:bg-blue-800 dark:bg-blue-600 dark:hover:bg-blue-500 text-white disabled:opacity-50 transition-colors"
-              >
-                {exportingPdf ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
-                    <span>Generando PDF AcroForm...</span>
-                  </>
-                ) : (
-                  <>
-                    <Download className="w-3.5 h-3.5" aria-hidden="true" />
-                    <span>Exportar PDF rellenable (AcroForm)</span>
-                  </>
-                )}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={exportingPdf || detectingFields}
+                  onClick={() =>
+                    void handleOpenSaveOrPrint(fields.length > 0 ? 'save' : 'print')
+                  }
+                  className="flex-1 inline-flex items-center justify-center gap-2 h-8 px-3 rounded-lg text-xs font-medium bg-blue-700 hover:bg-blue-800 dark:bg-blue-600 dark:hover:bg-blue-500 text-white disabled:opacity-50 transition-colors whitespace-nowrap"
+                >
+                  {exportingPdf ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" aria-hidden="true" />
+                      <span>Guardando PDF...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      <span>Guardar o imprimir</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={exportingPdf || detectingFields}
+                  onClick={() => void handleOpenSaveOrPrint('print')}
+                  title="Imprimir documento con cambios"
+                  className="inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Printer className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>Imprimir</span>
+                </button>
+              </div>
             </div>
           )}
 
@@ -1244,6 +1303,22 @@ export function EditorPage({
           />
         </div>
       </section>
+
+      <SaveOrPrintModal
+        open={saveOrPrintTab !== null}
+        initialTab={saveOrPrintTab ?? 'save'}
+        allowSave={isPdfDoc && fields.length > 0}
+        isElectron={isElectron}
+        document={document}
+        fields={mergedFieldsForOutput}
+        currentPage={Math.min(session.active_page, totalPages)}
+        totalPages={totalPages}
+        onClose={() => setSaveOrPrintTab(null)}
+        onSaveToDisk={handleExportWithDrafts}
+        onListPrinters={onListPrinters}
+        onReadWorkingFileBytes={onReadWorkingFileBytes}
+        onPrintRenderedDocument={onPrintRenderedDocument}
+      />
     </div>
   );
 }

@@ -5,6 +5,8 @@ import type {
   DocumentRecord,
   LibreDocAPI,
   OcrProgressEvent,
+  PrintDocumentOptions,
+  PrintRenderedPage,
   RenderedPagePayload,
   SessionStatePatch,
   UpdaterProgressPayload,
@@ -68,6 +70,13 @@ const api: LibreDocAPI = {
   deleteDocumentField: (fieldId: string) => ipcRenderer.invoke('fields:delete', fieldId),
   exportAcroFormPdf: (documentId: string, fields?: DocumentField[]) =>
     ipcRenderer.invoke('pdf:export-acroform', documentId, fields),
+
+  listPrinters: () => ipcRenderer.invoke('printers:list'),
+  printRenderedDocument: (
+    pages: PrintRenderedPage[],
+    options: PrintDocumentOptions,
+    documentTitle: string,
+  ) => ipcRenderer.invoke('document:print', pages, options, documentTitle),
 
   listVersionHistory: () => ipcRenderer.invoke('versions:list'),
   markVersionChangelogSeen: (version: string) => ipcRenderer.invoke('versions:mark-seen', version),

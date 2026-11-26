@@ -250,7 +250,7 @@ const MIGRATIONS: MigrationDefinition[] = [
   },
 ];
 
-const VALID_ROUTES = new Set<AppRoute>(['workspace', 'editor', 'updates']);
+const VALID_ROUTES = new Set<AppRoute>(['workspace', 'preview', 'editor', 'updates']);
 const VALID_THEMES = new Set<ThemeMode>(['light', 'dark']);
 const VALID_FIELD_TYPES = new Set<FieldType>(['text', 'checkbox', 'date', 'multiline']);
 const VALID_CHECKBOX_STYLES = new Set<CheckboxStyle>(['check', 'cross']);
@@ -391,7 +391,10 @@ export class DatabaseService {
       if (!existing) {
         this.saveSessionState({
           active_document_id: null,
-          active_route: session.active_route === 'editor' ? 'workspace' : session.active_route,
+          active_route:
+            session.active_route === 'editor' || session.active_route === 'preview'
+              ? 'workspace'
+              : session.active_route,
         });
       }
     }

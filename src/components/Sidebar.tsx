@@ -1,4 +1,4 @@
-import { Download, FileEdit, FolderOpen, Moon, Sun } from 'lucide-react';
+import { Download, Eye, FileEdit, FolderOpen, Moon, Sun } from 'lucide-react';
 import type { AppRoute, DocumentRecord, ThemeMode } from '../../shared/types';
 
 interface SidebarProps {
@@ -33,6 +33,12 @@ export function Sidebar({
       label: 'Inicio / Documentos',
       detail: documentsCount > 0 ? String(documentsCount) : undefined,
       icon: FolderOpen,
+    },
+    {
+      id: 'preview',
+      label: 'Vista previa',
+      detail: activeDocument ? activeDocument.original_name : undefined,
+      icon: Eye,
     },
     {
       id: 'editor',

@@ -13,9 +13,13 @@ import type {
   MigrationRecord,
   OcrRunResult,
   PlainTextContentResult,
+  PrintDocumentOptions,
+  PrintRenderedPage,
+  PrintResult,
   SessionState,
   SessionStatePatch,
   StorageDiagnostics,
+  SystemPrinterInfo,
   UnlockResult,
   UpdaterProgressPayload,
   UpdaterState,
@@ -729,6 +733,118 @@ function createBrowserPreviewBridge(): LibreDocAPI {
           success: false,
           fieldsExported: 0,
           message: 'No se pudo generar el PDF rellenable AcroForm.',
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+
+    async listPrinters(): Promise<SystemPrinterInfo[]> {
+      return [
+        {
+          name: 'browser-system-printer',
+          displayName: 'Impresoras del sistema (diálogo del navegador)',
+          description: 'En la app de escritorio Electron se listan todas las impresoras instaladas en Windows.',
+          status: 0,
+          isDefault: true,
+        },
+      ];
+    },
+
+    async printRenderedDocument(
+      pages: PrintRenderedPage[],
+      options: PrintDocumentOptions,
+      documentTitle: string,
+    ): Promise<PrintResult> {
+      if (!Array.isArray(pages) || pages.length === 0) {
+        return {
+          success: false,
+          message: 'No hay páginas preparadas para imprimir.',
+        };
+      }
+
+      try {
+        const cssPageSize =
+          options.pageSize === 'A4'
+            ? 'A4'
+            : options.pageSize === 'Legal'
+              ? 'legal'
+              : 'letter';
+        const cssOrientation = options.landscape ? 'landscape' : 'portrait';
+        const safeTitle = String(documentTitle || 'LibreDoc Studio')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+
+        const iframe = window.document.createElement('iframe');
+        iframe.style.position = 'fixed';
+        iframe.style.right = '0';
+        iframe.style.bottom = '0';
+        iframe.style.width = '0';
+        iframe.style.height = '0';
+        iframe.style.border = '0';
+        window.document.body.appendChild(iframe);
+
+        const doc = iframe.contentDocument;
+        const win = iframe.contentWindow;
+        if (!doc || !win) {
+          iframe.remove();
+          return {
+            success: false,
+            message: 'No se pudo abrir el marco de impresión en el navegador.',
+          };
+        }
+
+        const safePages = pages.filter(
+          (p) =>
+            p.dataUrl.startsWith('data:image/jpeg;base64,') ||
+            p.dataUrl.startsWith('data:image/png;base64,'),
+        );
+
+        doc.open();
+        doc.write(`<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>${safeTitle}</title>
+  <style>
+    @page { size: ${cssPageSize} ${cssOrientation}; margin: 0; }
+    html, body { margin: 0; padding: 0; background: #ffffff; }
+    .print-page {
+      width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center;
+      page-break-after: always; break-after: page; overflow: hidden;
+    }
+    .print-page:last-child { page-break-after: auto; break-after: auto; }
+    .print-page img {
+      max-width: 100%; max-height: 100%; object-fit: contain; display: block;
+      ${options.color ? '' : 'filter: grayscale(100%);'}
+    }
+  </style>
+</head>
+<body>
+${safePages.map((p) => `<div class="print-page"><img src="${p.dataUrl}" alt="Página ${p.pageNumber}" /></div>`).join('')}
+</body>
+</html>`);
+        doc.close();
+
+        await new Promise<void>((resolve) => {
+          window.setTimeout(resolve, 250);
+        });
+
+        win.focus();
+        win.print();
+
+        window.setTimeout(() => {
+          iframe.remove();
+        }, 1500);
+
+        return {
+          success: true,
+          message: `Diálogo de impresión abierto (${safePages.length} pág.).`,
+        };
+      } catch (err) {
+        return {
+          success: false,
+          message: 'No se pudo abrir la impresión en el navegador.',
           error: err instanceof Error ? err.message : String(err),
         };
       }
