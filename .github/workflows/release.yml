@@ -239,7 +239,7 @@ jobs:
               --repo "${{ github.repository }}" `
               --target "${{ github.sha }}" `
               --title "LibreDoc Studio $tag" `
-              --notes "Actualización $tag de LibreDoc Studio para Windows x64 (nuevo ícono oficial, vista previa en vivo y conversor automático de PDF estático a PDF rellenable AcroForm)." `
+              --notes "Actualización $tag de LibreDoc Studio para Windows x64: nueva sección Vista previa sin edición (con miniaturas, zoom y rotación), renderizado nítido HiDPI de PDFs y ventana Guardar o Imprimir con detección de impresoras instaladas y opciones completas de impresión." `
               --draft
             if ($LASTEXITCODE -ne 0) {
               Write-Error "Error creando la Release $tag en GitHub."

@@ -34,7 +34,7 @@ import {
 } from './browserAnalyzer';
 
 const PREVIEW_STORAGE_KEY = 'libredoc_studio_preview_db_v3';
-const APP_VERSION = '0.2.1';
+const APP_VERSION = '0.2.2';
 
 // Keep uploaded browser-preview file buffers in memory during the web preview session
 const previewFileBuffers = new Map<string, ArrayBuffer>();
@@ -84,7 +84,7 @@ function createInitialPreviewStore(): BrowserPreviewStore {
         version: APP_VERSION,
         installed_at: now,
         release_notes:
-          'Actualización v0.2.1: Nuevo ícono oficial de LibreDoc Studio para Windows y conversor automático de PDF estático a PDF rellenable (AcroForm) de alta precisión con detección híbrida de texto, vectores CTM y capa raster, casillas interactivas arrastrables y exportación estándar.',
+          'Actualización v0.2.2: Nueva Vista previa de PDF en modo solo lectura (arriba de Editor), renderizado nítido HiDPI y ventana Guardar o Imprimir con selección de impresoras instaladas y opciones de impresión.',
         changelog_seen: 0,
       },
     ],

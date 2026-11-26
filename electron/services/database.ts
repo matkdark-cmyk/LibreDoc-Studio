@@ -75,6 +75,8 @@ const DEFAULT_RELEASE_NOTES: Record<string, string> = {
     'Nueva vista previa en vivo del archivo en el costado derecho del Editor (PDF, imágenes, Word .docx y texto) con marcado interactivo en tiempo real de los espacios que se están editando y sincronización bidireccional.',
   '0.2.1':
     'Nuevo ícono oficial de LibreDoc Studio + conversor automático de alta precisión de PDF estático a PDF rellenable (AcroForm) con detección híbrida de tablas, checkboxes ✓/✕, prefijos $, fechas, guiones tapados y ajuste interactivo sobre el documento.',
+  '0.2.2':
+    'Nueva sección Vista previa en el menú lateral (lectura sin edición con miniaturas, zoom y rotación), renderizado nítido HiDPI de PDFs y nuevo menú Guardar o Imprimir con detección de impresoras instaladas en Windows y opciones completas de impresión.',
 };
 
 const MIGRATIONS: MigrationDefinition[] = [
