@@ -588,6 +588,11 @@ function MainApp() {
     [bridge],
   );
 
+  const handleReadWorkingFileBytes = useCallback(
+    (documentId: string) => bridge.readWorkingFileBytes(documentId),
+    [bridge],
+  );
+
   const handleMarkChangelogSeen = useCallback(
     async (version: string) => {
       await bridge.markVersionChangelogSeen(version);
@@ -811,6 +816,7 @@ function MainApp() {
               onUpdateFieldValue={handleUpdateFieldValue}
               onDeleteField={handleDeleteField}
               onReadPlainText={handleReadPlainText}
+              onReadWorkingFileBytes={handleReadWorkingFileBytes}
             />
           )}
 

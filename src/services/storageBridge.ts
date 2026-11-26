@@ -28,7 +28,7 @@ import {
 } from './browserAnalyzer';
 
 const PREVIEW_STORAGE_KEY = 'libredoc_studio_preview_db_v3';
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.2.0';
 
 // Keep uploaded browser-preview file buffers in memory during the web preview session
 const previewFileBuffers = new Map<string, ArrayBuffer>();

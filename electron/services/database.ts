@@ -68,6 +68,8 @@ interface MigrationDefinition {
 const DEFAULT_RELEASE_NOTES: Record<string, string> = {
   '0.1.0':
     'Estructura base de LibreDoc Studio para Windows, base de datos SQLite versionada en userData con migraciones automáticas y restauración exacta de sesión.',
+  '0.2.0':
+    'Nueva vista previa en vivo del archivo en el costado derecho del Editor (PDF, imágenes, Word .docx y texto) con marcado interactivo en tiempo real de los espacios que se están editando y sincronización bidireccional.',
 };
 
 const MIGRATIONS: MigrationDefinition[] = [
